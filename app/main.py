@@ -962,17 +962,20 @@ def get_playback(name: str) -> dict:
         try:
             data = {"systems": playback.systems(mpos_f), "instruments": playback.instruments(mid), "strip": None}
             if strip_ok:
-                tl = playback.timeline(sd / "strip.spos", sd / "strip-1.svg")
-                lay = playback.svg_layout(sd / "strip-1.svg")
                 rows = playback.systems(sd / "strip.mpos") if (sd / "strip.mpos").is_file() else []
+                # The line can land on page 2 when a tall score doesn't fit under the title.
+                svg = sd / f"strip-{(rows[0]['page'] if rows else 0) + 1}.svg"
+                if not svg.is_file():
+                    svg = sd / "strip-1.svg"
+                tl = playback.timeline(sd / "strip.spos", svg)
+                lay = playback.svg_layout(svg)
                 stems = json.loads((sd / "stems.json").read_text(encoding="utf-8"))
                 if tl and len(stems) == len(data["instruments"]):
                     for ins, st in zip(data["instruments"], stems):
                         if st.get("file") and (sd / st["file"]).is_file():
                             f = sd / st["file"]
                             ins["stem"] = f"/api/projects/{name}/files/{playback.PLAY_DIR}/{f.name}?t={int(f.stat().st_mtime)}"
-                svg = sd / "strip-1.svg"
-                data["strip"] = {"page": f"/api/projects/{name}/files/{playback.PLAY_DIR}/strip-1.svg?t={int(svg.stat().st_mtime)}",
+                data["strip"] = {"page": f"/api/projects/{name}/files/{playback.PLAY_DIR}/{svg.name}?t={int(svg.stat().st_mtime)}",
                                  "timeline": tl, "systems": rows, **lay} if tl else None
         except (OSError, ValueError, ET.ParseError, IndexError) as e:
             raise HTTPException(500, f"couldn't read the playback data: {e}") from e

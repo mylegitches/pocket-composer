@@ -60,7 +60,8 @@ def make_strip(src: Path, out_dir: Path, stem: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     rows = systems(mpos(out_dir, stem))
     total = sum(s["w"] for s in rows) / UNITS_PER_INCH
-    height = max(11.0, max((s["h"] for s in rows), default=0) / UNITS_PER_INCH + 4)
+    # Tall enough for the title and the whole line on page 1 (the title frame can take a few inches).
+    height = max(14.0, max((s["h"] for s in rows), default=0) / UNITS_PER_INCH + 8)
     style = d / "strip.mss"
     _write_style(style, min(3000.0, total * 1.5 + 6), height)
     for old in d.glob("strip-*.svg"):

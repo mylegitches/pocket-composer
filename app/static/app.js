@@ -1243,7 +1243,7 @@ function buildLine(box) {
   const W = tl.page_w;
   const sys = st.systems?.[0] || { x: 0, y: st.staves[0][0], w: W, h: st.staves.at(-1)[1] - st.staves[0][0] };
   const gap = (st.staves[0][1] - st.staves[0][0]) / 4 || 80;
-  const firstX = Math.min(...tl.events.map((e) => e[2]));
+  const firstX = Math.min(...tl.events.filter((e) => e[1] === (sys.page ?? e[1])).map((e) => e[2]));
   const headX0 = Math.max(0, Math.min(sys.x, ...st.names.map((n) => n[0])) - gap * 2);
   const headX1 = firstX - gap * 1.2;
   const bodyX1 = sys.x + sys.w + gap;
@@ -1309,7 +1309,7 @@ function buildLine(box) {
   body.append(cur);
   body.onclick = (e) => {
     const r = body.getBoundingClientRect();
-    seekTo(tl, 0, headX1 + (e.clientX - r.left) / scale, top + (e.clientY - r.top) / scale);
+    seekTo(tl, sys.page ?? 0, headX1 + (e.clientX - r.left) / scale, top + (e.clientY - r.top) / scale);
   };
   row.append(head, body);
   box.append(row);
