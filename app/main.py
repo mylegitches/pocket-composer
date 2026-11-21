@@ -1,0 +1,736 @@
+"""Web UI for flp2score: turn FL Studio projects, sheet-music scans, MusicXML and MIDI into MuseScore scores.
+
+    uvicorn app.main:app --reload            # local
+    docker compose up                        # container (see Dockerfile)
+
+Project kinds (decided by what was uploaded into data/<name>/):
+  flp     FL Studio project: map channels to instruments, then convert (fast, synchronous)
+  scan    PDF / photos of sheet music: find parts (AI endpoint or OCR), then OMR (slow, background job)
+  score   MusicXML / .mxl / MIDI: converted as-is by MuseScore
+  tab     saved Songsterr tab page (.html) or Songsterr part .json: tracks -> Guitar Pro -> MuseScore
+
+Scan projects can also be read as guitar/bass tab (by the AI endpoint) instead of notation.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import threading
+import time
+import traceback
+import uuid
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from flp2score import ai, arrange, assist, catalogue, export, flp, mapping, preview, sheet
+from flp2score.convert import FORMATS, convert, export_file
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data")).resolve()
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", ROOT / "output")).resolve()
+STATIC = Path(__file__).with_name("static")
+NOTE_NAMES = "C C# D D# E F F# G G# A A# B".split()
+SETTINGS_FILE = DATA_DIR / "settings.json"
+PREVIEW_DIR = OUTPUT_DIR / "_previews"
+# Starting favourites, until the user picks their own on the settings page.
+DEFAULT_FAVORITES = ["piano", "strings", "violoncello", "contrabass", "electric-bass", "bass-synthesizer",
+                     "saw-synth", "pad-synth", "drumset"]
+
+SCAN_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".heic", ".heif"}
+SCORE_EXTS = {".musicxml", ".mxl", ".xml", ".mid", ".midi"}
+TAB_EXTS = {".html", ".htm", ".json"}
+UPLOAD_EXTS = {".flp"} | SCAN_EXTS | SCORE_EXTS | TAB_EXTS
+META_FILES = {"parts.json", "mode.json", "mapping.json", "tracks.json"}  # our own files in a project folder
+
+app = FastAPI(title="flp2score")
+_convert_lock = threading.Lock()  # one MuseScore conversion at a time
+_preview_lock = threading.Lock()  # one instrument sample render at a time
+_job_lock = threading.Lock()  # one background job (OMR / AI) at a time
+
+
+@app.middleware("http")
+async def revalidate_ui(request, call_next):
+    """Browsers (phones especially) must re-check the UI files, or an update keeps running old JS."""
+    resp = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+# ---------------------------------------------------------------- helpers
+
+def _note(k: int) -> str:
+    return f"{NOTE_NAMES[k % 12]}{k // 12 - 1}"
+
+
+def _safe_name(name: str) -> str:
+    clean = re.sub(r"[^\w\- .()]+", "_", name).strip(" .")
+    if not clean:
+        raise HTTPException(400, "bad name")
+    return clean
+
+
+def _project_dir(name: str) -> Path:
+    d = (DATA_DIR / name).resolve()
+    if d.parent != DATA_DIR or not d.is_dir():
+        raise HTTPException(404, f"no project {name!r}")
+    return d
+
+
+def _sources(d: Path) -> tuple[str, list[Path]]:
+    """The project's kind and its input files."""
+    files = sorted(p for p in d.iterdir() if p.is_file() and p.name not in META_FILES)
+    if flps := [f for f in files if f.suffix.lower() == ".flp"]:
+        return "flp", flps[:1]
+    if scores := [f for f in files if f.suffix.lower() in SCORE_EXTS]:
+        return "score", scores[:1]
+    if tabs := [f for f in files if f.suffix.lower() in TAB_EXTS]:
+        return "tab", tabs[:1]
+    if scans := [f for f in files if f.suffix.lower() in SCAN_EXTS]:
+        return "scan", scans
+    return "", []
+
+
+def _work(name: str) -> Path:
+    return OUTPUT_DIR / name / "_work"
+
+
+def _outputs(name: str, stem: str) -> list[dict]:
+    out = OUTPUT_DIR / name
+    if not out.is_dir():
+        return []
+    files = []
+
+    def add(f: Path, url_path: str, part: bool = False):
+        files.append({"file": f.name, "kind": f.suffix.lstrip("."), "size": f.stat().st_size, "part": part,
+                      "url": f"/api/projects/{name}/files/{url_path}", "mtime": f.stat().st_mtime})
+
+    for f in sorted(out.iterdir()):
+        if f.is_file() and (f.name.startswith(stem + ".") or f.name.startswith(stem + "-")):
+            add(f, f.name)
+    if (out / "parts").is_dir():
+        for f in sorted((out / "parts").iterdir()):
+            if f.is_file():
+                add(f, "parts/" + f.name, part=True)
+    page_no = lambda f: int(m.group(1)) if (m := re.search(r"-(\d+)\.svg$", f["file"])) else 0  # noqa: E731
+    svgs = sorted((f for f in files if f["kind"] == "svg"), key=page_no)
+    return [f for f in files if f["kind"] != "svg"] + svgs
+
+
+def _timeline(name: str, stem: str) -> dict | None:
+    """Where each note sits on the score pages and when it plays, from MuseScore's .spos export.
+
+    Coordinates are converted to the SVG pages' own units (MuseScore writes .spos at 12x)."""
+    out = OUTPUT_DIR / name
+    spos, page = out / f"{stem}.spos", out / f"{stem}-1.svg"
+    if not spos.is_file() or not page.is_file():
+        return None
+    try:
+        root = ET.parse(spos).getroot()
+        head = page.read_text(encoding="utf-8", errors="ignore")[:1000]
+        w, h = map(float, re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', head).groups())
+    except (OSError, ValueError, AttributeError, ET.ParseError):
+        return None
+    els = {e.get("id"): e for e in root.iter("element")}
+    events = []
+    for ev in root.iter("event"):
+        e = els.get(ev.get("elid"))
+        if e is None:
+            continue
+        events.append([int(ev.get("position")), int(e.get("page")), round(float(e.get("x")) / 12),
+                       round(float(e.get("y")) / 12), round(float(e.get("sx")) / 12), round(float(e.get("sy")) / 12)])
+    events.sort()
+    return {"page_w": w, "page_h": h, "events": events}  # event: [ms, page, x, y, width, height]
+
+
+def _stem(name: str, kind: str, files: list[Path]) -> str:
+    return files[0].stem if kind == "flp" else name
+
+
+def _summary(name: str) -> dict:
+    d = _project_dir(name)
+    kind, files = _sources(d)
+    if not kind:
+        raise HTTPException(404, "project folder has no usable input file")
+    stem = _stem(name, kind, files)
+    base = {"name": name, "kind": kind, "file": files[0].name, "files": [f.name for f in files],
+            "outputs": _outputs(name, stem), "timeline": _timeline(name, stem), "job": _active_job(name),
+            "ai": _ai_public()}
+    if kind == "flp":
+        base.update(_flp_summary(d, files[0]))
+    elif kind == "scan":
+        base.update(_scan_summary(name, d))
+    elif kind == "tab":
+        base.update(_tab_summary(d, files[0]))
+    else:
+        base["title"] = name
+    return base
+
+
+def _flp_summary(d: Path, f: Path) -> dict:
+    proj = flp.read(f)
+    chans = arrange.flatten(proj)
+    m = mapping.merged(mapping.load(d), proj, chans)
+    pattern_names: dict[int, set[str]] = {}
+    for pat in proj.patterns.values():
+        for n in pat.notes:
+            pattern_names.setdefault(n.channel, set()).add(pat.name or f"Pattern {pat.id}")
+    channels = []
+    for ch, notes in chans.items():
+        keys = [n.key for n in notes]
+        channels.append({
+            "channel": ch,
+            "name": proj.channels.get(ch) or f"Channel {ch}",
+            "notes": len(notes),
+            "low": _note(min(keys)), "high": _note(max(keys)),
+            "distinct_keys": len(set(keys)),
+            "patterns": sorted(pattern_names.get(ch, [])),
+        })
+    unused = [proj.channels[c] for c in proj.channels if c not in chans and proj.channels[c]]
+    bars = arrange.song_length(proj) / proj.ppq / (proj.time_sig[0] * 4 / proj.time_sig[1])
+    return {
+        "fl_version": proj.version,
+        "tempo": proj.tempo,
+        "time_sig": f"{proj.time_sig[0]}/{proj.time_sig[1]}",
+        "bars": round(bars, 1),
+        "audio_clips": sum(1 for c in proj.clips if c.pattern is None),
+        "channels": channels,
+        "silent_channels": unused,
+        "mapping": m.to_json(),
+        "mapping_saved": (d / mapping.FILE_NAME).exists(),
+    }
+
+
+def _scan_summary(name: str, d: Path) -> dict:
+    pages_dir = _work(name) / "pages"
+    n_pages = len(list(pages_dir.glob("p[0-9][0-9][0-9].png"))) if pages_dir.is_dir() else 0
+    plan = sheet.load_plan(d)
+    return {
+        "read_as": sheet.read_as(d),
+        "pages": n_pages,
+        "title": plan.title if plan else name,
+        "plan": None if plan is None else {
+            "title": plan.title, "score_pages": plan.score_pages,
+            "parts": [{"name": p.name, "pages": p.pages, "clef": p.clef, "fifths": p.fifths, "skip": p.skip}
+                      for p in plan.parts]},
+    }
+
+
+def _read_tab_source(f: Path) -> dict:
+    """What a Songsterr page / part JSON holds: {"kind": "songsterr" | "songsterr-json", meta...}."""
+    from tabmaker import musescore_page, songsterr
+
+    data = f.read_bytes()
+    if f.suffix.lower() == ".json":
+        part = json.loads(data)
+        if not isinstance(part, dict) or "measures" not in part:
+            raise ValueError("this .json isn't a Songsterr part (no measures)")
+        name = part.get("name") or part.get("instrument") or "Track 1"
+        return {"kind": "songsterr-json", "title": f.stem, "artist": "", "defaultPartId": 0,
+                "tracks": [{"partId": 0, "title": name, "instrument": part.get("instrument", ""), "isDrums": False}]}
+    text = data.decode("utf-8", errors="replace")
+    if musescore_page.is_musescore_page(text):
+        info = musescore_page.parse_page(text)
+        raise ValueError(info["message"] + (f" Download link: {info['mxlUrl']}" if info.get("mxlUrl") else ""))
+    if '<script id="state"' not in text:
+        raise ValueError("not a saved Songsterr tab page (save the tab page itself with Ctrl+S, as HTML only)")
+    return {"kind": "songsterr", **songsterr.parse_page(text)}
+
+
+def _tab_tracks(d: Path, meta: dict) -> list:
+    try:
+        return json.loads((d / "tracks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [meta["defaultPartId"]]
+
+
+def _tab_summary(d: Path, f: Path) -> dict:
+    meta = _read_tab_source(f)
+    chosen = set(_tab_tracks(d, meta))
+    return {"title": meta.get("title") or d.name, "artist": meta.get("artist", ""), "source": meta["kind"],
+            "tracks": [{**t, "selected": t["partId"] in chosen} for t in meta["tracks"]]}
+
+
+# ---------------------------------------------------------------- background jobs
+
+JOBS: dict[str, dict] = {}
+
+
+def _active_job(name: str) -> dict | None:
+    for j in JOBS.values():
+        if j["project"] == name and j["state"] in ("queued", "running"):
+            return _job_public(j)
+    return None
+
+
+def _job_public(j: dict) -> dict:
+    return {k: j[k] for k in ("id", "project", "kind", "state", "progress", "log", "error", "started")}
+
+
+def _start_job(project: str, kind: str, fn) -> dict:
+    if _active_job(project):
+        raise HTTPException(409, "This project is already working on something.")
+    j = {"id": uuid.uuid4().hex[:12], "project": project, "kind": kind, "state": "queued", "progress": 0.0,
+         "log": [], "error": None, "started": time.time()}
+    JOBS[j["id"]] = j
+    for old in sorted(JOBS.values(), key=lambda x: x["started"])[:-30]:  # keep the list short
+        JOBS.pop(old["id"], None)
+
+    def log(msg: str):
+        msg = msg.strip()
+        if msg:
+            j["log"].append(msg)
+            del j["log"][:-200]
+
+    def run():
+        with _job_lock:
+            j["state"] = "running"
+            try:
+                fn(log, lambda f: j.__setitem__("progress", round(f, 3)))
+                j["state"], j["progress"] = "done", 1.0
+            except Exception as e:  # report anything to the UI rather than dying silently
+                j["state"], j["error"] = "failed", str(e) or e.__class__.__name__
+                log("Failed: " + j["error"])
+                traceback.print_exc()
+
+    threading.Thread(target=run, daemon=True).start()
+    return _job_public(j)
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    j = JOBS.get(job_id)
+    if not j:
+        raise HTTPException(404, "no such job (the server may have restarted)")
+    return _job_public(j)
+
+
+# ---------------------------------------------------------------- settings (favourites + AI endpoint)
+
+def _settings() -> dict:
+    try:
+        s = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        s = {}
+    s.setdefault("favorites", DEFAULT_FAVORITES)
+    s.setdefault("ai", {})
+    s["ai"].setdefault("use_for_parts", True)
+    return s
+
+
+def _write_settings(s: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(s, indent=1), encoding="utf-8")
+
+
+def _ai_cfg() -> dict:
+    return _settings()["ai"]
+
+
+def _ai_public() -> dict:
+    """The AI settings without the key itself (only whether one is saved, and its last 4 characters)."""
+    a = dict(_ai_cfg())
+    key = a.pop("api_key", "") or ""
+    a["has_key"] = bool(key)
+    a["key_hint"] = ("…" + key[-4:]) if len(key) > 8 else ("saved" if key else "")
+    a["configured"] = ai.configured(_ai_cfg())
+    return a
+
+
+class AIIn(BaseModel):
+    preset: str = ""
+    provider: str = ""
+    base_url: str = ""
+    model: str = ""
+    api_key: str | None = None  # None = keep the saved key
+    clear_key: bool = False
+    use_for_parts: bool = True
+
+
+class SettingsIn(BaseModel):
+    favorites: list[str] | None = None
+    ai: AIIn | None = None
+
+
+@app.get("/api/settings")
+def get_settings() -> dict:
+    s = _settings()
+    return {"favorites": s["favorites"], "ai": _ai_public(), "ai_presets": ai.PRESETS}
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsIn) -> dict:
+    s = _settings()
+    if body.favorites is not None:
+        known = catalogue.all_instruments()
+        s["favorites"] = list(dict.fromkeys(i for i in body.favorites if i in known))
+    if body.ai is not None:
+        _merge_ai(s["ai"], body.ai)
+    _write_settings(s)
+    return get_settings()
+
+
+def _merge_ai(cur: dict, new: AIIn) -> dict:
+    if new.provider and new.provider not in ai.PROVIDERS:
+        raise HTTPException(400, f"unknown provider {new.provider!r}")
+    cur.update(preset=new.preset, provider=new.provider, base_url=new.base_url.strip().rstrip("/"),
+               model=new.model.strip(), use_for_parts=new.use_for_parts)
+    if new.clear_key:
+        cur.pop("api_key", None)
+    elif new.api_key:
+        cur["api_key"] = new.api_key.strip()
+    return cur
+
+
+@app.post("/api/ai/test")
+def ai_test(body: AIIn) -> dict:
+    """Try the settings in the form (without saving them): one tiny text request."""
+    cfg = _merge_ai(dict(_ai_cfg()), body)
+    t0 = time.time()
+    try:
+        reply = ai.ask(cfg, "You are a connection test.", "Reply with the single word OK.")
+    except ai.AIError as e:
+        raise HTTPException(502, str(e)) from e
+    return {"ok": True, "reply": reply.strip()[:200], "seconds": round(time.time() - t0, 1)}
+
+
+@app.post("/api/ai/models")
+def ai_models(body: AIIn) -> dict:
+    cfg = _merge_ai(dict(_ai_cfg()), body)
+    try:
+        return {"models": ai.list_models(cfg)}
+    except ai.AIError as e:
+        raise HTTPException(502, str(e)) from e
+
+
+# ---------------------------------------------------------------- instruments
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"ok": True, "musescore": export.find_musescore()}
+
+
+@app.get("/api/instruments")
+def list_instruments() -> list[dict]:
+    out = []
+    for ins in catalogue.all_instruments().values():
+        entry = {"id": ins.id, "name": ins.name, "group": ins.group, "staves": ins.staves,
+                 "common": "common" in ins.genres, "transpose": ins.transpose[1], "description": ins.description}
+        if ins.drums:
+            entry["drums"] = [{"pitch": p, "name": d["name"]} for p, d in sorted(ins.drums.items())]
+        out.append(entry)
+    return out
+
+
+@app.get("/api/instruments/{ins_id}/preview")
+def instrument_preview(ins_id: str):
+    """An .mp3 of the instrument playing a short phrase, rendered by MuseScore once and then cached."""
+    if ins_id not in catalogue.all_instruments():
+        raise HTTPException(404, "no such instrument")
+    f = PREVIEW_DIR / f"{ins_id}.mp3"
+    if not f.exists():
+        if not export.find_musescore():
+            raise HTTPException(500, "MuseScore is not installed in this environment")
+        with _preview_lock:
+            if not f.exists():
+                try:
+                    preview.render(ins_id, f)
+                except Exception as e:
+                    raise HTTPException(500, str(e)) from e
+    return FileResponse(f, media_type="audio/mpeg", headers={"Cache-Control": "max-age=86400"})
+
+
+# ---------------------------------------------------------------- projects
+
+@app.get("/api/projects")
+def list_projects() -> list[dict]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for d in sorted(DATA_DIR.iterdir(), key=lambda p: p.name.lower()):
+        if not d.is_dir():
+            continue
+        kind, files = _sources(d)
+        if not kind:
+            continue
+        outs = _outputs(d.name, _stem(d.name, kind, files))
+        out.append({"name": d.name, "kind": kind, "file": files[0].name,
+                    "converted": any(o["kind"] == "mscz" and not o["part"] for o in outs),
+                    "busy": _active_job(d.name) is not None})
+    return out
+
+
+@app.post("/api/projects")
+async def upload_project(files: list[UploadFile] = File(...)) -> dict:
+    """One .flp, one MusicXML/MIDI file, or a PDF / several photos (pages, in the order picked)."""
+    files = [f for f in files if f.filename]
+    if not files:
+        raise HTTPException(400, "no file")
+    exts = [Path(f.filename).suffix.lower() for f in files]
+    if any(e not in UPLOAD_EXTS for e in exts):
+        raise HTTPException(400, "upload an FL Studio .flp, a PDF or photos of sheet music, MusicXML or MIDI")
+    if len(files) > 1 and not all(e in SCAN_EXTS for e in exts):
+        raise HTTPException(400, "only PDFs and photos can be uploaded several at a time (as the pages of one piece)")
+    stem = _safe_name(Path(files[0].filename).stem)
+    d = DATA_DIR / stem
+    if d.exists():
+        shutil.rmtree(d)  # re-uploading replaces the project's input (its output folder stays)
+    d.mkdir(parents=True)
+    for i, (f, ext) in enumerate(zip(files, exts), 1):
+        fname = f"{stem}{ext}" if len(files) == 1 else f"{i:03d}{ext}"  # numbered: pages stay in picked order
+        with (d / fname).open("wb") as fh:
+            shutil.copyfileobj(f.file, fh)
+    kind, srcs = _sources(d)
+    try:
+        if kind == "flp":
+            flp.read(srcs[0])
+        elif kind == "tab":
+            _read_tab_source(srcs[0])
+        elif kind == "scan":
+            work = _work(stem)
+            if work.exists():
+                shutil.rmtree(work)  # new pages: drop cached page images and OMR
+            sheet.render_pages(d, work)
+    except Exception as e:
+        shutil.rmtree(d, ignore_errors=True)
+        raise HTTPException(400, f"couldn't use {files[0].filename}: {e}") from e
+    return _summary(stem)
+
+
+@app.get("/api/projects/{name}")
+def get_project(name: str) -> dict:
+    return _summary(name)
+
+
+@app.delete("/api/projects/{name}")
+def delete_project(name: str) -> dict:
+    d = _project_dir(name)
+    if _active_job(name):
+        raise HTTPException(409, "wait for the running job to finish")
+    shutil.rmtree(d)
+    shutil.rmtree(OUTPUT_DIR / name, ignore_errors=True)
+    return {"ok": True}
+
+
+class MappingIn(BaseModel):
+    title: str = ""
+    channels: list[dict] = []
+
+
+@app.put("/api/projects/{name}/mapping")
+def save_mapping(name: str, body: MappingIn) -> dict:
+    d = _project_dir(name)
+    mapping.save(d, mapping.Mapping.from_json(body.model_dump()))
+    return _summary(name)
+
+
+@app.delete("/api/projects/{name}/mapping")
+def reset_mapping(name: str) -> dict:
+    d = _project_dir(name)
+    (d / mapping.FILE_NAME).unlink(missing_ok=True)
+    return _summary(name)
+
+
+@app.post("/api/projects/{name}/suggest")
+def suggest(name: str) -> dict:
+    """Ask the AI endpoint which MuseScore instrument fits each FL channel (not saved; the UI fills the rows)."""
+    s = _summary(name)
+    if s["kind"] != "flp":
+        raise HTTPException(400, "instrument suggestions are for FL Studio projects")
+    try:
+        return {"channels": assist.suggest_mapping(_ai_cfg(), s["channels"], _settings()["favorites"])}
+    except ai.AIError as e:
+        raise HTTPException(502, str(e)) from e
+
+
+# --- scans: pages and part plan
+
+@app.get("/api/projects/{name}/pages/{n}")
+def page_image(name: str, n: int, size: int = 400):
+    """A page of a scanned project, as a JPEG thumbnail (size = long side in px)."""
+    _project_dir(name)
+    src = _work(name) / "pages" / f"p{n:03d}.png"
+    if not src.is_file():
+        raise HTTPException(404, "no such page")
+    size = max(100, min(size, 2000))
+    thumb = _work(name) / "thumbs" / f"p{n:03d}-{size}.jpg"
+    if not thumb.exists() or thumb.stat().st_mtime < src.stat().st_mtime:
+        from PIL import Image
+
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        im = Image.open(src).convert("L")
+        im.thumbnail((size, size))
+        im.save(thumb, "JPEG", quality=80)
+    return FileResponse(thumb, media_type="image/jpeg")
+
+
+class PartIn(BaseModel):
+    name: str
+    pages: list[int]
+    clef: str | None = None
+    fifths: int | None = None
+    skip: bool = False
+
+
+class PlanIn(BaseModel):
+    title: str = ""
+    parts: list[PartIn] = []
+
+
+@app.put("/api/projects/{name}/plan")
+def save_plan(name: str, body: PlanIn) -> dict:
+    d = _project_dir(name)
+    old = sheet.load_plan(d)
+    plan = sheet.split.Plan(title=body.title.strip() or name,
+                            parts=[sheet.split.Part(name=p.name.strip() or "Part", pages=sorted(set(p.pages)),
+                                                    clef=p.clef or None, fifths=p.fifths, skip=p.skip)
+                                   for p in body.parts if p.pages],
+                            score_pages=old.score_pages if old else [])
+    sheet.save_plan(d, plan)
+    return _summary(name)
+
+
+class ReadAsIn(BaseModel):
+    read_as: str
+
+
+@app.put("/api/projects/{name}/read_as")
+def put_read_as(name: str, body: ReadAsIn) -> dict:
+    d = _project_dir(name)
+    if body.read_as not in ("notation", "tab"):
+        raise HTTPException(400, "read_as is 'notation' or 'tab'")
+    sheet.set_read_as(d, body.read_as)
+    return _summary(name)
+
+
+class DetectIn(BaseModel):
+    use_ai: bool = True
+
+
+@app.post("/api/projects/{name}/detect")
+def detect(name: str, body: DetectIn) -> dict:
+    d = _project_dir(name)
+    if _sources(d)[0] != "scan":
+        raise HTTPException(400, "part detection is for PDFs and photos")
+    cfg = _ai_cfg() if body.use_ai else None
+    if body.use_ai and not ai.configured(cfg):
+        raise HTTPException(400, "No AI endpoint is set up yet: add one on the Settings page, or use OCR.")
+    return _start_job(name, "detect", lambda log, prog: sheet.detect_plan(d, _work(name), name, cfg, log))
+
+
+# --- converting
+
+class ConvertIn(BaseModel):
+    formats: list[str] = ["mscz", "pdf"]
+    mapping: MappingIn | None = None
+    plan: PlanIn | None = None
+    tracks: list[int] | None = None  # tab projects: Songsterr track ids
+
+
+@app.post("/api/projects/{name}/convert")
+def run_convert(name: str, body: ConvertIn) -> dict:
+    d = _project_dir(name)
+    kind, files = _sources(d)
+    formats = [x for x in body.formats if x in FORMATS]
+    if not export.find_musescore():
+        raise HTTPException(500, "MuseScore is not installed in this environment")
+    out_dir = OUTPUT_DIR / name
+
+    if kind == "scan" and sheet.read_as(d) == "tab":
+        cfg = _ai_cfg()
+        if not ai.configured(cfg):
+            raise HTTPException(400, "Reading tab from photos needs an AI endpoint: set one up on the Settings page.")
+
+        def tab_job(log, prog):
+            with _convert_lock:
+                res = sheet.process_tab(d, _work(name), out_dir, name, formats, cfg, log, prog)
+            if res.failed:
+                log("MuseScore could not write: " + ", ".join(res.failed))
+            log("Done.")
+
+        summary = _summary(name)
+        summary["job"] = _start_job(name, "tab", tab_job)
+        return summary
+
+    if kind == "scan":
+        if body.plan is not None:
+            save_plan(name, body.plan)
+        cfg = _ai_cfg()
+        use_ai = cfg.get("use_for_parts", True) and ai.configured(cfg)
+
+        def job(log, prog):
+            if sheet.load_plan(d) is None:
+                sheet.detect_plan(d, _work(name), name, cfg if use_ai else None, log)
+            with _convert_lock:
+                res = sheet.process(d, _work(name), out_dir, name, formats, log, prog)
+            if res.failed:
+                log("MuseScore could not write: " + ", ".join(res.failed))
+            log(f"Done: {len(res.parts)} part(s).")
+
+        summary = _summary(name)
+        summary["job"] = _start_job(name, "convert", job)
+        return summary
+
+    if kind == "flp":
+        if body.mapping is not None:
+            mapping.save(d, mapping.Mapping.from_json(body.mapping.model_dump()))
+        with _convert_lock:
+            res = convert(files[0], out_dir, formats, mapping.load(d))
+    elif kind == "tab":
+        from tabmaker import gpsong, songsterr, songsterr_song
+
+        meta = _read_tab_source(files[0])
+        ids = body.tracks if body.tracks else _tab_tracks(d, meta)
+        (d / "tracks.json").write_text(json.dumps(ids), encoding="utf-8")
+        try:
+            if meta["kind"] == "songsterr-json":
+                parts = [json.loads(files[0].read_bytes())]
+            else:
+                parts = songsterr.fetch_parts_sync(meta, ids)
+            song = songsterr_song.build_song(parts, meta.get("title", ""), meta.get("artist", ""), meta.get("tempo"))
+        except (songsterr.SongsterrError, ValueError, KeyError) as e:
+            raise HTTPException(502, f"Couldn't build the tab: {e}") from e
+        gp = _work(name) / "tab.gp5"
+        gp.parent.mkdir(parents=True, exist_ok=True)
+        gp.write_bytes(gpsong.to_gp5_bytes(song))
+        with _convert_lock:
+            res = export_file(gp, out_dir, name, formats, title=meta.get("title") or name)
+        res.parts = [{"part": t.name, "instrument": "tab",
+                      "notes": sum(len(b.notes) for m in t.measures for v in m.voices for b in v.beats)}
+                     for t in song.tracks]
+    else:  # MusicXML / MIDI: MuseScore reads it directly
+        with _convert_lock:
+            res = export_file(files[0], out_dir, name, formats)
+            res.parts = [{"part": "score", "instrument": files[0].suffix.lstrip(".").upper(), "notes": "—"}]
+    summary = _summary(name)
+    summary["result"] = {"parts": res.parts, "failed": res.failed,
+                         "message": None if res.parts else
+                         "No piano-roll notes on the playlist: nothing to notate (audio clips can't be scored)."}
+    return summary
+
+
+@app.get("/api/projects/{name}/files/{filename:path}")
+def get_file(name: str, filename: str):
+    out = (OUTPUT_DIR / name).resolve()
+    f = (out / filename).resolve()
+    if out not in f.parents or "_work" in f.relative_to(out).parts or not f.is_file():
+        raise HTTPException(404, "no such file")
+    media = {"svg": "image/svg+xml", "pdf": "application/pdf", "mp3": "audio/mpeg",
+             "gp5": "application/octet-stream"}.get(f.suffix.lstrip("."))
+    inline = f.suffix in (".svg", ".pdf", ".mp3")
+    return FileResponse(f, media_type=media, filename=None if inline else f.name)
+
+
+@app.get("/")
+def index():
+    return FileResponse(STATIC / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=STATIC), name="static")

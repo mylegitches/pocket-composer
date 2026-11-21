@@ -1,0 +1,16 @@
+music21>=9.1
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-multipart>=0.0.12
+# AI endpoints
+anthropic>=2.0
+httpx>=0.27
+# sheet-music scans (musescore-maker v2 pipeline)
+homr[cpu]>=0.7
+rapidocr_onnxruntime>=1.4
+pypdfium2>=4.30
+pillow
+numpy
+opencv-python-headless
+pillow-heif
+pyguitarpro>=0.9

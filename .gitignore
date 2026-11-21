@@ -1,0 +1,12 @@
+# local environment
+.venv/
+__pycache__/
+*.pyc
+.claude/
+
+# your projects, settings (incl. AI API key) and results: never commit these
+data/*
+!data/.gitkeep
+input/
+output/
+*.flp

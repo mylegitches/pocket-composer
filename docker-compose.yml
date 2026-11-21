@@ -1,0 +1,11 @@
+services:
+  flp2score:
+    build: .
+    image: flp2score:latest
+    container_name: flp2score
+    ports:
+      - "8090:8000"          # web UI at http://localhost:8090
+    volumes:
+      - ./data:/app/data     # projects: data/<name>/<name>.flp (+ mapping.json)
+      - ./output:/app/output # scores
+    restart: unless-stopped

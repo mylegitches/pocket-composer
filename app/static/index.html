@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flp2score</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">♪</span> flp2score <span class="sub">FL Studio · sheet music → MuseScore</span></div>
+    <div class="top-right">
+      <div id="health" class="health"></div>
+      <a id="open-settings" class="top-link" href="#:settings">⚙ Settings</a>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <label id="drop" class="drop">
+        <input id="upload" type="file" multiple hidden
+          accept=".flp,.html,.htm,.json,.pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.tif,.tiff,.bmp,.musicxml,.mxl,.xml,.mid,.midi,image/*">
+        <strong>Upload</strong>
+        <span>FL Studio .flp · PDF or photos of sheet music or tab (pick several photos for several pages) · MusicXML · MIDI · saved Songsterr page</span>
+      </label>
+      <h2>Projects</h2>
+      <ul id="projects" class="projects"></ul>
+    </aside>
+
+    <main id="main">
+      <section id="empty" class="empty">
+        <h1>Pick or upload a project</h1>
+        <p><b>FL Studio projects:</b> each channel with piano-roll notes becomes a part. Choose a MuseScore
+          instrument for each one, then convert.</p>
+        <p><b>PDFs and photos of sheet music:</b> the parts are found (by your AI endpoint, or OCR), the notes are
+          read by a recognition model, and MuseScore writes the score and one file per part.</p>
+        <p><b>Guitar and bass tab:</b> photos of a tab are read by your AI endpoint; a saved Songsterr tab page
+          (Ctrl+S, “HTML only”) downloads its tracks. Both become Guitar Pro and then a score.</p>
+        <p><b>MusicXML and MIDI</b> go straight through MuseScore. Tick <b>.gp5</b> to also get a Guitar Pro file.</p>
+      </section>
+
+      <section id="settings" hidden>
+        <div class="project-head">
+          <div>
+            <h1 class="page-title">Settings</h1>
+            <div class="meta">Saved on the server, so every device sees the same choices.</div>
+          </div>
+        </div>
+        <div class="card" id="ai-card">
+          <h2>AI endpoint</h2>
+          <p class="muted">Reads sheet-music pages (title, instrument names, which pages make up each part, clef and
+            key) and suggests instruments for FL Studio channels. The notes themselves are read by homr, a recognition
+            model that runs inside this app, so they don't depend on the AI.</p>
+          <div class="form-grid">
+            <label>Service <select id="ai-preset"></select></label>
+            <label>Endpoint URL <input id="ai-url" placeholder="https://…" autocomplete="off"></label>
+            <label>Model
+              <span class="row"><input id="ai-model" list="ai-models" autocomplete="off" placeholder="pick or type a model">
+                <button id="ai-list" type="button" class="ghost">List models</button></span>
+              <datalist id="ai-models"></datalist>
+            </label>
+            <label>API key <input id="ai-key" type="password" autocomplete="new-password"></label>
+          </div>
+          <label class="check"><input type="checkbox" id="ai-parts" checked> Use AI to find the parts in PDFs and
+            photos (otherwise OCR)</label>
+          <p class="muted small">For sheet music, pick a model that can read images (a "vision" model). The key is
+            kept on this server in <code>data/settings.json</code> and is never sent back to the browser.</p>
+          <div class="actions wrap">
+            <button id="ai-save" class="primary">Save</button>
+            <button id="ai-test" class="secondary">Test connection</button>
+            <button id="ai-clear" class="ghost">Remove saved key</button>
+          </div>
+          <p id="ai-status" class="small"></p>
+        </div>
+
+        <div class="card">
+          <h2>Favorite instruments</h2>
+          <p class="muted">Favorites appear first in every instrument list. Tap ☆ to add or remove one and ▶ to hear it.
+            The first play of an instrument takes a few seconds while MuseScore renders it.</p>
+          <div id="fav-chips" class="fav-chips"></div>
+        </div>
+        <div class="card">
+          <h2>All instruments</h2>
+          <div id="settings-browser"></div>
+        </div>
+      </section>
+
+      <section id="project" hidden>
+        <div class="project-head">
+          <div>
+            <input id="title" class="title-input" aria-label="Score title">
+            <div id="meta" class="meta"></div>
+          </div>
+          <div class="actions wrap">
+            <button id="suggest" class="secondary flp-only" title="Ask the AI endpoint to pick instruments">✨ Suggest instruments</button>
+            <button id="reset" class="ghost flp-only" title="Forget saved choices and use the automatic guesses">Reset to guesses</button>
+            <button id="save" class="secondary flp-only">Save mapping</button>
+            <button id="delete" class="ghost danger" title="Delete this project and its output">Delete</button>
+          </div>
+        </div>
+
+        <div id="job" class="card job" hidden>
+          <div class="job-head"><span id="job-spin" class="spinner"></span><b id="job-title"></b>
+            <span id="job-pct" class="muted"></span></div>
+          <div class="bar"><div id="job-bar"></div></div>
+          <pre id="job-log" class="job-log"></pre>
+        </div>
+
+        <div id="tab-panel" class="card" hidden>
+          <h2>Tracks</h2>
+          <p class="muted small">Pick the tracks to download from Songsterr. They become one Guitar Pro file and one score.</p>
+          <div id="tab-tracks" class="tracks"></div>
+        </div>
+
+        <div id="scan-panel" hidden>
+          <div class="card read-as">
+            <label>These pages are
+              <select id="read-as">
+                <option value="notation">sheet music (notes read by homr, on this server)</option>
+                <option value="tab">guitar or bass tab (frets read by the AI endpoint)</option>
+              </select>
+            </label>
+            <p id="read-as-hint" class="muted small"></p>
+          </div>
+          <div class="card" id="parts-card">
+            <div class="card-head">
+              <h2>Parts</h2>
+              <div class="actions wrap">
+                <button id="detect-ai" class="secondary">✨ Find parts with AI</button>
+                <button id="detect-ocr" class="ghost">Find parts with OCR</button>
+              </div>
+            </div>
+            <p id="plan-hint" class="muted small"></p>
+            <div class="table-wrap flat">
+              <table class="mapping plan">
+                <thead><tr><th class="c-inc">Use</th><th>Part (instrument)</th><th>Pages</th><th>Clef</th><th>Key</th><th></th></tr></thead>
+                <tbody id="plan-rows"></tbody>
+              </table>
+            </div>
+            <div class="plan-foot">
+              <button id="add-part" class="ghost">+ Add part</button>
+              <button id="save-plan" class="secondary">Save parts</button>
+            </div>
+          </div>
+          <h2>Pages</h2>
+          <div id="thumbs" class="thumbs"></div>
+        </div>
+
+        <div id="flp-panel">
+        <div id="notice" class="notice" hidden></div>
+
+        <div class="table-wrap">
+          <table class="mapping">
+            <thead>
+              <tr>
+                <th class="c-inc">Use</th>
+                <th>FL channel</th>
+                <th>Part name <span class="hint" title="Channels with the same part name and instrument are merged into one part">ⓘ</span></th>
+                <th>MuseScore instrument</th>
+                <th>Options</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <p id="silent" class="silent"></p>
+        </div>
+
+        <div class="convert-bar">
+          <div class="formats">
+            <span>Formats</span>
+            <label><input type="checkbox" value="mscz" checked> .mscz</label>
+            <label><input type="checkbox" value="pdf" checked> .pdf</label>
+            <label><input type="checkbox" value="mxl"> .mxl</label>
+            <label><input type="checkbox" value="mid"> .mid</label>
+            <label><input type="checkbox" value="mp3" checked> audio (.mp3)</label>
+            <label><input type="checkbox" value="gp5"> Guitar Pro (.gp5)</label>
+          </div>
+          <button id="convert" class="primary">Convert</button>
+        </div>
+
+        <div id="result" class="result" hidden>
+          <h2>Output</h2>
+          <div id="parts" class="parts"></div>
+          <audio id="score-audio" class="score-audio" controls preload="none" hidden></audio>
+          <div id="downloads" class="downloads"></div>
+          <div id="part-files" hidden>
+            <h2>Part files</h2>
+            <div id="part-downloads" class="downloads"></div>
+          </div>
+          <div id="pages" class="pages"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="row-tpl">
+    <tr>
+      <td class="c-inc"><input type="checkbox" class="inc"></td>
+      <td>
+        <div class="ch-name"></div>
+        <div class="ch-info"></div>
+      </td>
+      <td><input class="part"></td>
+      <td>
+        <div class="ins-cell">
+          <button type="button" class="ins-btn"><span class="ins-name"></span><span class="caret">▾</span></button>
+          <button type="button" class="play" title="Hear this instrument" aria-label="Play preview">▶</button>
+        </div>
+        <div class="ins-group"></div>
+      </td>
+      <td class="opts">
+        <label class="opt staves-opt">Staves
+          <select class="staves">
+            <option value="auto">auto</option><option value="1">1</option><option value="2">2</option>
+          </select>
+        </label>
+        <label class="opt drum-opt">Sound
+          <select class="drum"></select>
+        </label>
+        <label class="opt">Octave
+          <select class="octave">
+            <option value="-24">−2</option><option value="-12">−1</option><option value="0" selected>0</option>
+            <option value="12">+1</option><option value="24">+2</option>
+          </select>
+        </label>
+      </td>
+    </tr>
+  </template>
+
+  <template id="plan-tpl">
+    <tr>
+      <td class="c-inc"><input type="checkbox" class="inc" checked></td>
+      <td><input class="pname" list="part-names"></td>
+      <td><input class="ppages" placeholder="1-3, 5" inputmode="numeric"></td>
+      <td><select class="pclef">
+        <option value="">auto</option><option value="G2">treble</option><option value="F4">bass</option>
+        <option value="C3">alto</option><option value="C4">tenor</option><option value="percussion">percussion</option>
+      </select></td>
+      <td><select class="pkey"></select></td>
+      <td><button type="button" class="ghost premove" title="Remove this part">✕</button></td>
+    </tr>
+  </template>
+  <datalist id="part-names"></datalist>
+
+  <dialog id="picker" class="picker">
+    <div class="picker-head">
+      <div>
+        <div class="picker-title">Choose instrument</div>
+        <div id="picker-for" class="muted"></div>
+      </div>
+      <button type="button" id="picker-close" class="ghost" aria-label="Close">✕</button>
+    </div>
+    <div id="picker-browser" class="picker-body"></div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
