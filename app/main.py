@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, preview, sheet
+from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, playback, preview, sheet
 from flp2score.convert import FORMATS, convert, export_file
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -581,6 +581,8 @@ def list_projects() -> list[dict]:
         last = _last_job(d.name)
         out.append({"name": d.name, "kind": kind, "file": files[0].name,
                     "converted": any(o["kind"] in ("mscz", "pdf", "mp3") and not o["part"] for o in outs),
+                    "audio": any(o["kind"] == "mp3" and not o["part"] for o in outs),
+                    "updated": max((o["mtime"] for o in outs), default=d.stat().st_mtime),
                     "busy": _active_job(d.name) is not None,
                     "job": {k: last[k] for k in ("id", "kind", "state", "progress", "error")} if last else None})
     return out
@@ -884,6 +886,60 @@ def get_project(name: str) -> dict:
     return _summary(name)
 
 
+# --- the Play screen
+
+_play_cache: dict[tuple, dict] = {}
+
+
+def _play_files(name: str) -> tuple[str, Path]:
+    d = _project_dir(name)
+    kind, files = _sources(d)
+    if not kind:
+        raise HTTPException(404, "project folder has no usable input file")
+    return _stem(name, kind, files), OUTPUT_DIR / name
+
+
+def _play_source(out: Path, stem: str) -> Path | None:
+    """The score MuseScore made last time: what the Play data is (re)built from."""
+    for ext in ("mscz", "musicxml", "mxl"):
+        if (out / f"{stem}.{ext}").is_file():
+            return out / f"{stem}.{ext}"
+    return None
+
+
+@app.get("/api/projects/{name}/playback")
+def get_playback(name: str) -> dict:
+    """Audio, score pages, where each system is, and when each instrument sounds."""
+    stem, out = _play_files(name)
+    mp3, spos = out / f"{stem}.mp3", out / f"{stem}.spos"
+    mpos_f, mid = playback.mpos(out, stem), playback.play_mid(out, stem)
+    pages = sorted(out.glob(f"{stem}-*.svg"), key=lambda p: int(p.stem.rsplit("-", 1)[1])) if out.is_dir() else []
+    ready = mp3.is_file() and spos.is_file() and mpos_f.is_file() and mid.is_file() and bool(pages)
+    if not ready:
+        return {"ready": False, "can_prepare": _play_source(out, stem) is not None,
+                "job": _active_job(name)}
+    key = (name, mp3.stat().st_mtime, mpos_f.stat().st_mtime, mid.stat().st_mtime)
+    if key not in _play_cache:
+        try:
+            data = {"systems": playback.systems(mpos_f), "instruments": playback.instruments(mid)}
+        except (OSError, ValueError, ET.ParseError, IndexError) as e:
+            raise HTTPException(500, f"couldn't read the playback data: {e}") from e
+        _play_cache.clear()
+        _play_cache[key] = data
+    q = lambda p: f"/api/projects/{name}/files/{p.name}?t={int(p.stat().st_mtime)}"  # noqa: E731
+    return {"ready": True, "audio": q(mp3), "pages": [q(p) for p in pages], "timeline": _timeline(name, stem),
+            **_play_cache[key]}
+
+
+@app.post("/api/projects/{name}/playback")
+def prepare_playback(name: str) -> dict:
+    """Make what the Play screen needs from the last converted score (pieces converted before it existed)."""
+    stem, out = _play_files(name)
+    if _play_source(out, stem) is None:
+        raise HTTPException(400, "convert this piece first")
+    return _queue_job(name, "playback", {})
+
+
 @app.delete("/api/projects/{name}")
 def delete_project(name: str) -> dict:
     d = _project_dir(name)
@@ -1103,6 +1159,29 @@ def _run_job(j: dict, log, progress) -> dict | None:
         plan = sheet.detect_plan(d, _work(name), name, cfg, log)
         return {"parts": [{"part": p.name, "instrument": f"pages {p.pages[0]}–{p.pages[-1]}", "notes": "—"}
                           for p in plan.parts], "failed": []}
+
+    if j["kind"] == "playback":
+        stem = _stem(name, kind, files)
+        src = _play_source(out_dir, stem)
+        if src is None:
+            raise RuntimeError("convert this piece first")
+        log(f"MuseScore: laying out {src.name} for playback…")
+        progress(0.1)
+        # Pages, note and bar positions and the instrument MIDI all come from the same score, so they line up.
+        for old in out_dir.glob(f"{stem}-*.svg"):
+            old.unlink()
+        targets = [out_dir / f"{stem}.svg", out_dir / f"{stem}.spos", playback.mpos(out_dir, stem),
+                   playback.play_mid(out_dir, stem)]
+        if not (out_dir / f"{stem}.mp3").is_file():
+            targets.append(out_dir / f"{stem}.mp3")
+            log("No audio yet: MuseScore is rendering it too (this takes a while for long pieces).")
+        targets[3].parent.mkdir(parents=True, exist_ok=True)
+        export.convert(src, targets)
+        missing = [t.name for t in targets[1:] if not t.exists()]
+        if missing:
+            raise RuntimeError("MuseScore could not write: " + ", ".join(missing))
+        log("Ready to play.")
+        return {"parts": [], "failed": []}
 
     formats = params.get("formats") or ["mscz", "pdf"]
     if kind == "scan" and sheet.read_as(d) == "tab":

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import export, flp, score
+from . import export, flp, playback, score
 from .mapping import Mapping
 
 FORMATS = ["mscz", "pdf", "mxl", "mid", "mp3", "gp5", "svg"]
@@ -36,9 +36,12 @@ def export_file(src: Path, out_dir: Path, stem: str, formats: list[str], preview
     if not previews:
         fmts = [f for f in fmts if f != "svg"]
     targets = [out_dir / f"{stem}.{f}" for f in fmts if f != "gp5"]
+    extras = []  # for the Play screen; not reported as missing if MuseScore skips them
     if previews and "mp3" in fmts:
         targets.append(out_dir / f"{stem}.spos")
-    export.convert(src, targets)
+        extras = [playback.mpos(out_dir, stem), playback.play_mid(out_dir, stem)]
+        extras[1].parent.mkdir(parents=True, exist_ok=True)
+    export.convert(src, targets + extras)
     res = Result(title=title or stem, out_dir=out_dir, parts=[])
     if "gp5" in fmts:
         gp5 = out_dir / f"{stem}.gp5"

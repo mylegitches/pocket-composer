@@ -230,27 +230,45 @@ function jobBadge(p) {
   return { text: "", cls: "" };
 }
 
+const KIND_LABEL = { flp: "FL Studio", scan: "Sheet music", score: "MusicXML / MIDI", tab: "Tab" };
+const hashFor = (name, view) => "#" + encodeURIComponent(name) + (view === "play" ? "/play" : "");
+
+function pieceCard(p) {
+  const li = document.createElement("li");
+  li.className = "piece";
+  li.dataset.name = p.name;
+  const b = jobBadge(p);
+  li.innerHTML = `<a class="piece-main"><span class="piece-kind" aria-hidden="true"></span><span class="piece-text">
+      <span class="piece-name"></span><span class="piece-meta"></span></span></a>
+    <div class="piece-foot"><span class="badge ${b.cls}">${b.spin ? '<span class="spinner"></span>' : ""}<span></span></span>
+      <span class="piece-actions"><a class="button primary small-btn play-btn">▶ Play</a>
+      <a class="button secondary small-btn edit-btn">✎ Edit</a></span></div>`;
+  li.querySelector(".badge span:last-child").textContent = b.text;
+  if (b.title) li.title = b.title;
+  li.querySelector(".piece-kind").textContent = KIND_ICON[p.kind] || "♪";
+  li.querySelector(".piece-name").textContent = p.name;
+  li.querySelector(".piece-meta").textContent =
+    `${KIND_LABEL[p.kind] || p.kind} · ${new Date(p.updated * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
+  li.querySelector(".piece-main").href = hashFor(p.name, p.audio ? "play" : "edit");
+  li.querySelector(".play-btn").href = hashFor(p.name, "play");
+  li.querySelector(".play-btn").hidden = !p.audio;
+  li.querySelector(".edit-btn").href = hashFor(p.name, "edit");
+  li.querySelector(".piece-main").ondblclick = (e) => { e.preventDefault(); renameProject(p.name); };
+  return li;
+}
+
 async function loadProjects() {
   clearTimeout(listTimer);
   let list;
   try { list = await api("/api/projects"); } catch (e) { listTimer = setTimeout(loadProjects, 5000); return; }
-  const ul = $("#projects");
-  ul.innerHTML = "";
-  for (const p of list) {
-    const li = document.createElement("li");
-    li.dataset.name = p.name;
-    const b = jobBadge(p);
-    li.innerHTML = `<span class="pl-name"><span class="kind"></span><span></span></span><span class="badge ${b.cls}">${b.spin ? '<span class="spinner"></span>' : ""}<span></span></span>`;
-    li.querySelector(".badge span:last-child").textContent = b.text;
-    if (b.title) li.title = b.title;
-    li.querySelector(".kind").textContent = KIND_ICON[p.kind] || "";
-    li.querySelector(".pl-name span:last-child").textContent = p.name;
-    li.onclick = () => { location.hash = encodeURIComponent(p.name); };
-    li.ondblclick = (e) => { e.preventDefault(); renameProject(p.name); }; // desktop shortcut; phones use ✎ Rename
-    if (p.name === state.current) li.classList.add("active");
-    ul.append(li);
+  state.list = list;
+  const ul = $("#pieces");
+  ul.replaceChildren(...list.map(pieceCard));
+  if (!list.length) {
+    ul.innerHTML = `<li class="pieces-empty card"><p><b>No pieces yet.</b> Add a photo, a PDF, a link, a MusicXML or MIDI
+      file, or an FL Studio project, and PocketComposer turns it into a MuseScore score you can play along with.</p>
+      <a class="button primary" href="#:new">＋ Add your first piece</a></li>`;
   }
-  if (!list.length) ul.innerHTML = `<li class="badge">No projects yet</li>`;
   // A piece's job finished while it's open (started on another device, or after a restart): show the result.
   for (const p of list) {
     const st = p.job?.state;
@@ -272,10 +290,29 @@ function setTitle(section) {
 
 function showPage(which) {
   if (which === "settings") setTitle("Settings");
-  else if (which === "empty") setTitle("");
-  for (const id of ["empty", "project", "settings"]) $("#" + id).hidden = id !== which;
-  $("#open-settings").classList.toggle("active", which === "settings");
-  if (which !== "project") document.querySelectorAll("#projects li").forEach((li) => li.classList.remove("active"));
+  else if (which === "home") setTitle("Pieces");
+  else if (which === "new") setTitle("New piece");
+  for (const id of ["home", "new", "project", "settings"]) $("#" + id).hidden = id !== which;
+  $("#nav-home").classList.toggle("active", which === "home" || which === "project");
+  $("#nav-new").classList.toggle("active", which === "new");
+  $("#nav-settings").classList.toggle("active", which === "settings");
+  if (which !== "project") leavePlay();
+}
+
+// The two tabs of a piece: Edit (instruments, parts, convert, downloads) and Play.
+function setView(view) {
+  state.view = view;
+  const name = state.current;
+  $("#edit-view").hidden = view !== "edit";
+  $("#play-view").hidden = view !== "play";
+  for (const [id, v] of [["#tab-edit", "edit"], ["#tab-play", "play"]]) {
+    $(id).href = hashFor(name, v);
+    $(id).classList.toggle("active", v === view);
+    $(id).setAttribute("aria-current", v === view ? "page" : "false");
+  }
+  document.body.classList.toggle("playing-view", view === "play");
+  setTitle(view === "play" ? `${name} · Play` : name);
+  if (view === "play") openPlay(); else leavePlay();
 }
 
 function renderFavChips() {
@@ -302,15 +339,20 @@ function renderFavChips() {
 
 function openSettings() {
   state.current = null;
+  state.project = null;
   showPage("settings");
   renderFavChips();
   renderAiSettings();
   instrumentBrowser($("#settings-browser"));
 }
 
-async function openProject(name) {
+async function openProject(name, view = "edit", force = false) {
+  const same = state.current === name && state.project?.name === name;
   state.current = name;
-  document.querySelectorAll("#projects li").forEach((li) => li.classList.toggle("active", li.dataset.name === name));
+  showPage("project");
+  $("#pname").textContent = name;
+  if (same && !force) { setView(view); return; }
+  state.view = view;
   try {
     render(await api(`/api/projects/${encodeURIComponent(name)}`));
   } catch (e) {
@@ -321,7 +363,7 @@ async function openProject(name) {
 function render(p) {
   state.project = p;
   showPage("project");
-  setTitle(p.name);
+  $("#pname").textContent = p.name;
   const kind = p.kind;
   document.querySelectorAll(".flp-only").forEach((el) => { el.hidden = kind !== "flp"; });
   $("#suggest").hidden = kind !== "flp" || !p.ai?.configured;
@@ -339,6 +381,7 @@ function render(p) {
   renderOutputs(p);
   // Show the job card while it runs, or if the last one failed; a finished job's card isn't needed.
   showJob(p.job && p.job.state !== "done" ? p.job : null);
+  setView(state.view || "edit");
 }
 
 function renderFlp(p) {
@@ -547,7 +590,8 @@ function showJob(job) {
   const running = job.state === "queued" || job.state === "running";
   $("#job-spin").hidden = !running;
   const p = state.project;
-  const what = job.kind === "detect" ? "Finding the parts"
+  const what = job.kind === "playback" ? "Getting it ready to play"
+    : job.kind === "detect" ? "Finding the parts"
     : p?.kind === "scan" && p.read_as === "tab" ? "Reading the tab with the AI and writing the score"
     : p?.kind === "scan" ? "Reading the notes and writing the score" : "Writing the score";
   $("#job-title").textContent = what + (job.state === "queued" ? " (waiting its turn)" : job.state === "failed"
@@ -581,12 +625,13 @@ let shownFinished = null;
 async function jobFinished(job) {
   if (shownFinished === job.id) return;
   shownFinished = job.id;
-  await openProject(job.project);
+  const view = job.kind === "playback" ? "play" : state.view || "edit";
+  await openProject(job.project, view, true);
   showJob(job);
   if (job.result && job.kind === "convert") renderOutputs(state.project, job.result);
   loadProjects();
   if (job.state === "failed") toast(job.error || "The job failed", true);
-  else if (job.kind === "convert") $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
+  else if (job.kind === "convert" && state.view === "edit") $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ---------------------------------------------------------------- AI suggestions for FL channels
@@ -623,12 +668,12 @@ async function renameProject(name = state.current) {
       method: "POST", body: JSON.stringify({ name: next.trim() }),
     });
     delete lastStates[name];
-    await loadProjects();
     toast(`Renamed to ${p.name}`);
-    const h = "#" + encodeURIComponent(p.name);
-    if (state.current === name || location.hash === "#" + encodeURIComponent(name)) {
-      if (location.hash === h) openProject(p.name); else location.hash = h;
-    }
+    if (state.current === name) {
+      state.current = p.name;
+      state.project = null;
+      location.hash = hashFor(p.name, state.view);
+    } else loadProjects();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -638,9 +683,8 @@ async function deleteProject() {
   try {
     await api(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" });
     state.current = null;
+    state.project = null;
     location.hash = "";
-    showPage("empty");
-    loadProjects();
     toast(`Deleted ${name}`);
   } catch (e) { toast(e.message, true); }
 }
@@ -824,13 +868,9 @@ function renderOutputs(p, result) {
   if (result?.message) toast(result.message, true);
   if (result?.failed?.length) toast("MuseScore could not write: " + result.failed.join(", "), true);
 
-  const audio = $("#score-audio");
-  const mp3 = files.find((f) => f.kind === "mp3");
-  audio.hidden = !mp3;
-  if (mp3) {
-    const src = `${mp3.url}?t=${Math.round(mp3.mtime)}`;
-    if (audio.getAttribute("src") !== src) audio.src = src;
-  } else audio.removeAttribute("src");
+  const mp3 = files.find((f) => f.kind === "mp3" && !f.part);
+  $("#go-play").hidden = !mp3;
+  $("#go-play").href = hashFor(p.name, "play");
 
   const dl = $("#downloads");
   dl.innerHTML = "";
@@ -843,46 +883,223 @@ function renderOutputs(p, result) {
     a.firstChild.textContent = label;
     return a;
   };
-  for (const f of files.filter((f) => !f.part && f.kind !== "svg" && f.kind !== "spos")) dl.append(link(f, "." + f.kind));
+  for (const f of files.filter((f) => !f.part && !["svg", "spos", "mpos"].includes(f.kind))) dl.append(link(f, "." + f.kind));
   const partFiles = files.filter((f) => f.part);
   $("#part-files").hidden = !partFiles.length;
   $("#part-downloads").innerHTML = "";
   for (const f of partFiles) $("#part-downloads").append(link(f, f.file));
-  const pages = $("#pages");
-  pages.innerHTML = "";
-  files.filter((f) => f.kind === "svg" && !f.part).forEach((f, i) => {
+}
+
+// ---------------------------------------------------------------- Play screen
+//
+// The score follows the audio, laid out as pages (top to bottom) or as one continuous strip that scrolls
+// sideways. MuseScore's .spos says where each note column is and when it plays; .mpos gives each system's
+// box, which is how the strip is cut out of the pages. The instrument names light up while each one sounds.
+
+const play = { name: null, data: null, raf: 0, sys: [], cursor: null, last: null, userScroll: 0, lights: [] };
+const LAYOUT_KEY = "pocketcomposer.layout";
+const STRIP_GAP = 10;
+
+function getLayout() {
+  try { return localStorage.getItem(LAYOUT_KEY) || "strip"; } catch { return "strip"; }
+}
+
+function setLayout(v) {
+  try { localStorage.setItem(LAYOUT_KEY, v); } catch { /* private window: just don't remember it */ }
+  renderScore();
+}
+
+async function openPlay() {
+  const name = state.current;
+  const audio = $("#score-audio");
+  let d;
+  try { d = await api(`/api/projects/${encodeURIComponent(name)}/playback`); } catch (e) { toast(e.message, true); return; }
+  if (state.current !== name || state.view !== "play") return;
+  $("#play-prep").hidden = d.ready;
+  $("#play-ui").hidden = !d.ready;
+  if (!d.ready) {
+    play.data = null;
+    audio.pause();
+    const busy = d.job && (d.job.state === "queued" || d.job.state === "running");
+    $("#play-prep-text").textContent = busy
+      ? "Getting it ready to play. MuseScore is laying out the score; the progress is shown above."
+      : d.can_prepare
+        ? "This piece was converted before the Play screen existed. Getting it ready takes MuseScore about a minute (a few more if it also has to make the audio)."
+        : "There's nothing to play yet. Convert this piece with “audio (.mp3)” ticked, on the Edit tab.";
+    $("#play-prep-go").hidden = busy || !d.can_prepare;
+    $("#play-prep-edit").hidden = d.can_prepare;
+    $("#play-prep-edit").href = hashFor(name, "edit");
+    if (busy) showJob(d.job);
+    return;
+  }
+  play.name = name;
+  play.data = d;
+  if (audio.getAttribute("src") !== d.audio) audio.src = d.audio;
+  renderLights();
+  renderScore();
+}
+
+function leavePlay() {
+  $("#score-audio")?.pause();
+  cancelAnimationFrame(play.raf);
+}
+
+async function preparePlay() {
+  try {
+    showJob(await api(`/api/projects/${encodeURIComponent(state.current)}/playback`, { method: "POST" }));
+    $("#play-prep-go").hidden = true;
+    $("#play-prep-text").textContent = "Getting it ready to play. MuseScore is laying out the score; the progress is shown above.";
+    loadProjects();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- instrument lights
+
+function renderLights() {
+  const box = $("#lights");
+  box.innerHTML = "";
+  play.lights = (play.data.instruments || []).map((ins) => {
+    const el = document.createElement("span");
+    el.className = "light";
+    el.innerHTML = `<span class="note" aria-hidden="true">♪</span><span></span>`;
+    el.lastChild.textContent = ins.name;
+    el.title = `${ins.name}: ${ins.notes} notes`;
+    box.append(el);
+    return { el, ins, on: false, hit: -1 };
+  });
+  box.hidden = !play.lights.length;
+}
+
+// Index of the last item whose start (item[0], or the item itself) is at or before ms; -1 if none.
+function lastAtOrBefore(arr, ms, key = (x) => x) {
+  let lo = 0, hi = arr.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (key(arr[mid]) <= ms) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans;
+}
+
+function updateLights(ms, running) {
+  for (const L of play.lights) {
+    const i = lastAtOrBefore(L.ins.spans, ms, (s) => s[0]);
+    const on = i >= 0 && ms < L.ins.spans[i][1] && (running || ms > 0);
+    if (on !== L.on) { L.on = on; L.el.classList.toggle("on", on); }
+    const h = lastAtOrBefore(L.ins.hits, ms);
+    if (h !== L.hit) {
+      const fresh = running && h >= 0 && ms - L.ins.hits[h] < 200;
+      L.hit = h;
+      if (fresh) { L.el.classList.remove("hit"); void L.el.offsetWidth; L.el.classList.add("hit"); }
+    }
+  }
+}
+
+// ---- the score
+
+function renderScore() {
+  const d = play.data;
+  if (!d) return;
+  const layout = getLayout();
+  for (const [id, v] of [["#lay-strip", "strip"], ["#lay-pages", "pages"]]) {
+    $(id).classList.toggle("on", v === layout);
+    $(id).setAttribute("aria-pressed", String(v === layout));
+  }
+  const box = $("#play-score");
+  box.innerHTML = "";
+  play.sys = [];
+  play.cursor = null;
+  play.last = null;
+  if (layout === "strip" && d.systems?.length) buildStrip(box);
+  else buildPages(box);
+  drawCursor();
+}
+
+function buildPages(box) {
+  box.className = "pages seekable";
+  play.data.pages.forEach((url, i) => {
     const page = document.createElement("div");
     page.className = "page";
     page.dataset.page = i;
     const img = document.createElement("img");
-    img.src = `${f.url}?t=${stamp}`;
-    img.alt = f.file;
+    img.src = url;
+    img.alt = `page ${i + 1}`;
     img.loading = "lazy";
     page.append(img);
-    page.onclick = (e) => seekToClick(page, e);
-    pages.append(page);
+    page.onclick = (e) => {
+      const tl = play.data.timeline;
+      const r = page.getBoundingClientRect();
+      seekTo(i, (e.clientX - r.left) / r.width * tl.page_w, (e.clientY - r.top) / r.height * tl.page_h);
+    };
+    box.append(page);
   });
-  follow.timeline = p.timeline || null;
-  follow.last = null;
-  pages.classList.toggle("seekable", !!follow.timeline);
-  drawCursor();
 }
 
-// ---------------------------------------------------------------- playback line
-
-// MuseScore's .spos export says where each note column is on the pages and when it plays.
-// While the score audio plays, a line moves through those positions and the view follows it.
-const follow = { timeline: null, last: null, raf: 0 };
+// Cut each system out of its page and lay them side by side: one long line of music.
+function buildStrip(box) {
+  box.className = "strip";
+  const d = play.data;
+  const { page_w: W, page_h: H } = d.timeline;
+  const sys = d.systems;
+  // Room above and below each system for ledger lines and markings, without reaching into its neighbours.
+  const pads = sys.map((s, i) => {
+    const prev = sys[i - 1]?.page === s.page ? sys[i - 1] : null;
+    const next = sys[i + 1]?.page === s.page ? sys[i + 1] : null;
+    const room = Math.max(s.h * 0.35, W * 0.02);
+    return {
+      top: Math.max(0, Math.min(room, prev ? (s.y - prev.y - prev.h) / 2 : s.y)),
+      bot: Math.max(0, Math.min(room, next ? (next.y - s.y - s.h) / 2 : H - s.y - s.h)),
+    };
+  });
+  const above = Math.max(...pads.map((p) => p.top));
+  const below = Math.max(...sys.map((s, i) => s.h + pads[i].bot));
+  const stripH = above + below;
+  const top = box.getBoundingClientRect().top + scrollY;
+  const avail = Math.max(180, Math.min(innerHeight * 0.75, innerHeight - (top - scrollY) - 56));
+  const scale = Math.min(avail / stripH, 2.2 * box.clientWidth / W);
+  const padX = W * 0.006;
+  const row = document.createElement("div");
+  row.className = "strip-row";
+  row.style.height = `${stripH * scale}px`;
+  let left = 0;
+  sys.forEach((s, i) => {
+    const w = (s.w + 2 * padX) * scale;
+    const el = document.createElement("div");
+    el.className = "sys";
+    el.style.width = `${w}px`;
+    const clip = document.createElement("div");
+    clip.className = "clip";
+    clip.style.top = `${(above - pads[i].top) * scale}px`;
+    clip.style.height = `${(s.h + pads[i].top + pads[i].bot) * scale}px`;
+    const img = document.createElement("img");
+    img.src = d.pages[s.page];
+    img.alt = i ? "" : "score";
+    img.draggable = false;
+    img.style.width = `${W * scale}px`;
+    img.style.left = `${-(s.x - padX) * scale}px`;
+    img.style.top = `${-(s.y - pads[i].top) * scale}px`;
+    clip.append(img);
+    el.append(clip);
+    const info = { ...s, left, x0: s.x - padX, scale, above };
+    el.onclick = (e) => {
+      const r = el.getBoundingClientRect();
+      seekTo(s.page, info.x0 + (e.clientX - r.left) / scale, s.y - above + (e.clientY - r.top) / scale);
+    };
+    play.sys.push(info);
+    row.append(el);
+    left += w + STRIP_GAP;
+  });
+  const cur = document.createElement("div");
+  cur.className = "cursor strip-cursor";
+  cur.hidden = true;
+  row.append(cur);
+  play.cursor = cur;
+  box.append(row);
+}
 
 function cursorAt(ms) {
-  const ev = follow.timeline?.events;
-  if (!ev?.length) return null;
-  let lo = 0, hi = ev.length - 1;
-  if (ms < ev[0][0]) return null;
-  while (lo < hi) { // last event at or before ms
-    const mid = (lo + hi + 1) >> 1;
-    if (ev[mid][0] <= ms) lo = mid; else hi = mid - 1;
-  }
+  const ev = play.data?.timeline?.events;
+  if (!ev?.length || ms < ev[0][0]) return null;
+  const lo = lastAtOrBefore(ev, ms, (e) => e[0]);
   const [t, page, x, y, w, h] = ev[lo];
   const next = ev[lo + 1];
   // Glide toward the next note when it is on the same system; otherwise toward this note's right edge.
@@ -893,55 +1110,79 @@ function cursorAt(ms) {
   return { page, x: x + (x2 - x) * frac, y, h };
 }
 
+function systemFor(pos) {
+  let best = null, bestD = Infinity;
+  for (const s of play.sys) {
+    if (s.page !== pos.page) continue;
+    const d = pos.y < s.y ? s.y - pos.y : pos.y > s.y + s.h ? pos.y - s.y - s.h : 0;
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+
 function drawCursor() {
   const audio = $("#score-audio");
-  document.querySelectorAll("#pages .cursor").forEach((c) => c.remove());
-  if (!follow.timeline || audio.hidden || (audio.paused && audio.currentTime === 0)) return;
-  const pos = cursorAt(audio.currentTime * 1000);
+  if (!play.data || $("#play-view").hidden) return;
+  const ms = audio.currentTime * 1000;
+  const running = !audio.paused;
+  updateLights(ms, running);
+  const idle = audio.paused && audio.currentTime === 0;
+  const pos = idle ? null : cursorAt(ms);
+  const box = $("#play-score");
+  const follow = running && Date.now() > play.userScroll;
+  if (play.cursor) { // strip
+    const s = pos && systemFor(pos);
+    play.cursor.hidden = !s;
+    if (!s) return;
+    const x = s.left + (pos.x - s.x0) * s.scale;
+    play.cursor.style.left = `${x}px`;
+    play.cursor.style.top = `${(s.above + pos.y - s.y) * s.scale}px`;
+    play.cursor.style.height = `${pos.h * s.scale}px`;
+    if (follow) box.scrollLeft = x - box.clientWidth * 0.3; // the score glides past a fixed reading point
+    return;
+  }
+  box.querySelectorAll(".cursor").forEach((c) => c.remove());
   if (!pos) return;
-  const page = document.querySelector(`#pages .page[data-page="${pos.page}"]`);
+  const page = box.querySelector(`.page[data-page="${pos.page}"]`);
   if (!page) return;
-  const { page_w: W, page_h: H } = follow.timeline;
+  const { page_w: W, page_h: H } = play.data.timeline;
   const c = document.createElement("div");
   c.className = "cursor";
-  c.style.left = (pos.x / W * 100) + "%";
-  c.style.top = (pos.y / H * 100) + "%";
-  c.style.height = (pos.h / H * 100) + "%";
+  c.style.left = `${pos.x / W * 100}%`;
+  c.style.top = `${pos.y / H * 100}%`;
+  c.style.height = `${pos.h / H * 100}%`;
   page.append(c);
-  // Scroll when the line moves to another system (or the user scrolled it out of sight).
+  // Scroll when the line moves to another system (or it's out of sight).
   const key = pos.page + ":" + pos.y;
   const r = c.getBoundingClientRect();
   const offscreen = r.bottom < 60 || r.top > innerHeight - 20;
-  if (!audio.paused && (key !== follow.last || offscreen)) {
-    follow.last = key;
+  if (follow && (key !== play.last || offscreen)) {
+    play.last = key;
     c.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 }
 
 function followLoop() {
   drawCursor();
-  if (!$("#score-audio").paused) follow.raf = requestAnimationFrame(followLoop);
+  if (!$("#score-audio").paused) play.raf = requestAnimationFrame(followLoop);
 }
 
-// Click on the score: jump the audio to the note column nearest the click.
-function seekToClick(page, e) {
-  const tl = follow.timeline;
-  const audio = $("#score-audio");
-  if (!tl || audio.hidden) return;
-  const rect = page.getBoundingClientRect();
-  const px = (e.clientX - rect.left) / rect.width * tl.page_w;
-  const py = (e.clientY - rect.top) / rect.height * tl.page_h;
-  const n = Number(page.dataset.page);
+// Jump the audio to the note column nearest a point on a page.
+function seekTo(pageNo, px, py) {
+  const tl = play.data?.timeline;
+  if (!tl) return;
   let best = null, bestD = Infinity;
   for (const ev of tl.events) {
-    if (ev[1] !== n) continue;
+    if (ev[1] !== pageNo) continue;
     const dy = py < ev[3] ? ev[3] - py : py > ev[3] + ev[5] ? py - ev[3] - ev[5] : 0;
     const d = dy * 4 + Math.abs(px - ev[2]);
     if (d < bestD) { bestD = d; best = ev; }
   }
   if (!best) return;
+  const audio = $("#score-audio");
   audio.currentTime = best[0] / 1000;
-  follow.last = null;
+  play.last = null;
+  play.userScroll = 0;
   if (audio.paused) audio.play().catch(() => {});
   drawCursor();
 }
@@ -1206,10 +1447,29 @@ async function init() {
     el.classList.toggle("bad", !h.musescore);
   });
   const scoreAudio = $("#score-audio");
-  scoreAudio.addEventListener("play", () => { stopPreview(); cancelAnimationFrame(follow.raf); followLoop(); });
+  scoreAudio.addEventListener("play", () => { stopPreview(); cancelAnimationFrame(play.raf); followLoop(); });
   scoreAudio.addEventListener("seeked", drawCursor);
   scoreAudio.addEventListener("pause", drawCursor);
-  scoreAudio.addEventListener("ended", () => { follow.last = null; scoreAudio.currentTime = 0; drawCursor(); });
+  scoreAudio.addEventListener("ended", () => { play.last = null; scoreAudio.currentTime = 0; drawCursor(); });
+  $("#lay-strip").onclick = () => setLayout("strip");
+  $("#lay-pages").onclick = () => setLayout("pages");
+  $("#play-prep-go").onclick = preparePlay;
+  // Scrolling the score yourself pauses the follow for a few seconds.
+  for (const ev of ["wheel", "touchstart"]) {
+    $("#play-score").addEventListener(ev, () => { play.userScroll = Date.now() + 4000; }, { passive: true });
+  }
+  let resizeTimer = 0;
+  addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (!$("#play-view").hidden && getLayout() === "strip") renderScore(); }, 200);
+  });
+  // Space plays and pauses on the Play tab.
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || $("#play-view").hidden || $("#play-ui").hidden) return;
+    if (e.target.closest("input, textarea, select, button, audio, [contenteditable]")) return;
+    e.preventDefault();
+    scoreAudio.paused ? scoreAudio.play().catch(() => {}) : scoreAudio.pause();
+  });
   player.addEventListener("play", () => scoreAudio.pause());
   $("#picker-close").onclick = () => $("#picker").close();
   $("#picker").addEventListener("close", stopPreview);
@@ -1222,12 +1482,17 @@ async function init() {
   state.aiTasks = settings.ai_tasks;
   state.byId = Object.fromEntries(state.instruments.map((i) => [i.id, i]));
   await loadProjects();
+  // #  Pieces · #:new · #:settings · #<piece> (Edit) · #<piece>/play
   const fromHash = () => {
-    const name = decodeURIComponent(location.hash.slice(1));
+    const raw = location.hash.slice(1);
     stopPreview();
-    if (name === ":settings") openSettings();
-    else if (name && name !== state.current) openProject(name);
-    else if (!name) { state.current = null; showPage("empty"); }
+    if (raw === ":settings") openSettings();
+    else if (raw === ":new") { state.current = null; showPage("new"); }
+    else if (!raw) { state.current = null; showPage("home"); loadProjects(); }
+    else {
+      const isPlay = raw.endsWith("/play");
+      openProject(decodeURIComponent(isPlay ? raw.slice(0, -5) : raw), isPlay ? "play" : "edit");
+    }
   };
   window.addEventListener("hashchange", fromHash);
   fromHash();
