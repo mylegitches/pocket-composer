@@ -1044,7 +1044,7 @@ function buildStrip(box) {
   const pads = sys.map((s, i) => {
     const prev = sys[i - 1]?.page === s.page ? sys[i - 1] : null;
     const next = sys[i + 1]?.page === s.page ? sys[i + 1] : null;
-    const room = Math.max(s.h * 0.35, W * 0.02);
+    const room = Math.max(s.h * 0.14, W * 0.012);
     return {
       top: Math.max(0, Math.min(room, prev ? (s.y - prev.y - prev.h) / 2 : s.y)),
       bot: Math.max(0, Math.min(room, next ? (next.y - s.y - s.h) / 2 : H - s.y - s.h)),
@@ -1061,6 +1061,30 @@ function buildStrip(box) {
   row.className = "strip-row";
   row.style.height = `${stripH * scale}px`;
   let left = 0;
+  // Staff labels: the instrument names in front of the first line, pinned on the left while the strip scrolls.
+  const s0 = sys[0];
+  const labelX = W * 0.05;
+  if (s0.x - labelX > W * 0.04) {
+    const lw = (s0.x - labelX) * scale;
+    const lab = document.createElement("div");
+    lab.className = "sys labels";
+    lab.style.width = `${lw}px`;
+    const clip = document.createElement("div");
+    clip.className = "clip";
+    clip.style.top = `${(above - pads[0].top) * scale}px`;
+    clip.style.height = `${(s0.h + pads[0].top + pads[0].bot) * scale}px`;
+    const img = document.createElement("img");
+    img.src = d.pages[s0.page];
+    img.alt = "";
+    img.draggable = false;
+    img.style.width = `${W * scale}px`;
+    img.style.left = `${-labelX * scale}px`;
+    img.style.top = `${-(s0.y - pads[0].top) * scale}px`;
+    clip.append(img);
+    lab.append(clip);
+    row.append(lab);
+    left += lw + STRIP_GAP;
+  }
   sys.forEach((s, i) => {
     const w = (s.w + 2 * padX) * scale;
     const el = document.createElement("div");
