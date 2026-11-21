@@ -1108,6 +1108,7 @@ async function initStudio() {
   $("#pick-studio").hidden = false;
   $("#pick-studio").onclick = () => {
     $("#studio").showModal();
+    if (matchMedia("(pointer: fine)").matches) $("#studio-search").focus(); // not on phones: no keyboard pop-up
     const q = $("#studio-search").value;
     q.trim() ? studioSearch(q) : studioOpen($("#studio").dataset.path || "");
   };
