@@ -788,32 +788,41 @@ def library(path: str = "") -> dict:
     return {"enabled": True, "path": "" if rel == "." else rel, "dirs": dirs, "files": files}
 
 
+_lib_index: dict = {"at": 0.0, "files": []}
+_lib_lock = threading.Lock()
+LIB_INDEX_TTL = 300  # seconds; walking the whole NAS folder takes several seconds
+
+
+def _library_index() -> list[dict]:
+    """Every importable file in the library (cached for a few minutes)."""
+    with _lib_lock:
+        if time.time() - _lib_index["at"] < LIB_INDEX_TTL:
+            return _lib_index["files"]
+        root = _library_path("")
+        files = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [n for n in dirnames if n.lower() not in SKIP_DIRS and not n.startswith(".")]
+            for n in filenames:
+                if Path(n).suffix.lower() in LIBRARY_EXTS:
+                    try:
+                        e = _lib_entry(Path(dirpath) / n, root)
+                    except OSError:
+                        continue
+                    e["hay"] = e["path"].lower()
+                    files.append(e)
+        files.sort(key=lambda e: -e["mtime"])
+        _lib_index.update(at=time.time(), files=files)
+        return files
+
+
 @app.get("/api/library/search")
 def library_search(q: str, limit: int = 150) -> dict:
     """Importable files anywhere in the library whose folder or file name contains every word of q."""
-    root = _library_path("")
     words = [w for w in q.lower().split() if w]
     if not words:
         return {"files": [], "more": False}
-    out = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [n for n in dirnames if n.lower() not in SKIP_DIRS and not n.startswith(".")]
-        rel_dir = Path(dirpath).relative_to(root).as_posix().lower()
-        for n in filenames:
-            if Path(n).suffix.lower() not in LIBRARY_EXTS:
-                continue
-            hay = f"{rel_dir}/{n.lower()}"
-            if all(w in hay for w in words):
-                try:
-                    out.append(_lib_entry(Path(dirpath) / n, root))
-                except OSError:
-                    continue
-                if len(out) > limit:
-                    break
-        if len(out) > limit:
-            break
-    out.sort(key=lambda e: -e["mtime"])
-    return {"files": out[:limit], "more": len(out) > limit}
+    out = [e for e in _library_index() if all(w in e["hay"] for w in words)]
+    return {"files": [{k: v for k, v in e.items() if k != "hay"} for e in out[:limit]], "more": len(out) > limit}
 
 
 class LibraryIn(BaseModel):
