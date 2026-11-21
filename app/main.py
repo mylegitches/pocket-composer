@@ -355,6 +355,12 @@ def _worker() -> None:
             traceback.print_exc()
         j["finished"] = time.time()
         _save_job(j)
+        if j["kind"] == "convert" and j["state"] == "done":
+            try:  # converted without audio: make it playable anyway, in the background
+                if _needs_playback(j["project"]) and not _active_job(j["project"]):
+                    _queue_job(j["project"], "playback", {})
+            except Exception:
+                traceback.print_exc()
 
 
 @app.on_event("startup")
@@ -379,6 +385,28 @@ def _load_jobs() -> None:
         _save_job(j)
         _queue.put(j["id"])
     threading.Thread(target=_worker, daemon=True, name="jobs").start()
+    _backfill_playback()
+
+
+def _needs_playback(name: str) -> bool:
+    """Converted, but missing what the Play tab needs (pieces converted before it existed)."""
+    try:
+        stem, out = _play_files(name)
+    except HTTPException:
+        return False
+    if _play_source(out, stem) is None:
+        return False
+    have = [out / f"{stem}.mp3", out / f"{stem}.spos", playback.mpos(out, stem), playback.play_mid(out, stem)]
+    return not (all(p.is_file() for p in have) and any(out.glob(f"{stem}-*.svg")))
+
+
+def _backfill_playback() -> None:
+    """On startup, queue a background job to get every converted piece ready to play."""
+    if not DATA_DIR.is_dir():
+        return
+    for d in sorted(DATA_DIR.iterdir()):
+        if d.is_dir() and not _active_job(d.name) and _needs_playback(d.name):
+            _queue_job(d.name, "playback", {})
 
 
 @app.get("/api/jobs")
@@ -916,8 +944,11 @@ def get_playback(name: str) -> dict:
     pages = sorted(out.glob(f"{stem}-*.svg"), key=lambda p: int(p.stem.rsplit("-", 1)[1])) if out.is_dir() else []
     ready = mp3.is_file() and spos.is_file() and mpos_f.is_file() and mid.is_file() and bool(pages)
     if not ready:
-        return {"ready": False, "can_prepare": _play_source(out, stem) is not None,
-                "job": _active_job(name)}
+        can = _play_source(out, stem) is not None
+        job = _active_job(name)
+        if can and not job:  # get it ready now, without being asked
+            job = _queue_job(name, "playback", {})
+        return {"ready": False, "can_prepare": can, "job": job}
     key = (name, mp3.stat().st_mtime, mpos_f.stat().st_mtime, mid.stat().st_mtime)
     if key not in _play_cache:
         try:

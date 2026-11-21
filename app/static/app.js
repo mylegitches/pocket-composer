@@ -625,7 +625,7 @@ let shownFinished = null;
 async function jobFinished(job) {
   if (shownFinished === job.id) return;
   shownFinished = job.id;
-  const view = job.kind === "playback" ? "play" : state.view || "edit";
+  const view = state.view || "edit";
   await openProject(job.project, view, true);
   showJob(job);
   if (job.result && job.kind === "convert") renderOutputs(state.project, job.result);
@@ -922,11 +922,13 @@ async function openPlay() {
     audio.pause();
     const busy = d.job && (d.job.state === "queued" || d.job.state === "running");
     $("#play-prep-text").textContent = busy
-      ? "Getting it ready to play. MuseScore is laying out the score; the progress is shown above."
+      ? (d.job.state === "queued"
+        ? "Getting it ready to play: waiting for the jobs ahead of it. It opens here by itself when it's done."
+        : "Getting it ready to play: MuseScore is laying out the score. It opens here by itself when it's done.")
       : d.can_prepare
-        ? "This piece was converted before the Play screen existed. Getting it ready takes MuseScore about a minute (a few more if it also has to make the audio)."
-        : "There's nothing to play yet. Convert this piece with “audio (.mp3)” ticked, on the Edit tab.";
-    $("#play-prep-go").hidden = busy || !d.can_prepare;
+        ? "Getting it ready to play…"
+        : "There's nothing to play yet. Convert this piece on the Edit tab first.";
+    $("#play-prep-go").hidden = true;
     $("#play-prep-edit").hidden = d.can_prepare;
     $("#play-prep-edit").href = hashFor(name, "edit");
     if (busy) showJob(d.job);
