@@ -768,6 +768,8 @@ def library(path: str = "") -> dict:
         return {"enabled": False}
     root = LIBRARY_DIR.resolve()
     d = _library_path(path)
+    if time.time() - _lib_index["at"] >= LIB_INDEX_TTL and not _lib_lock.locked():
+        threading.Thread(target=_library_index, daemon=True).start()  # warm it up for search
     if not d.is_dir():
         raise HTTPException(400, "not a folder")
     dirs, files = [], []
