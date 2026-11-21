@@ -28,6 +28,7 @@
           <label class="pick"><input id="pick-photos" type="file" accept="image/*" multiple hidden>🖼️<span>Photos</span></label>
           <label class="pick"><input id="upload" type="file" multiple hidden
             accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.tif,.tiff,.bmp,.musicxml,.mxl,.xml,.mid,.midi,.flp,.html,.htm,.json">📁<span>Files</span></label>
+          <button type="button" id="pick-studio" class="pick" hidden>🎛️<span>Studio</span></button>
         </div>
         <span>photos or PDFs of sheet music or tab (several photos = several pages), MusicXML, MIDI, FL Studio,
           Songsterr pages. Drop files here or paste an image anywhere.</span>
@@ -37,6 +38,15 @@
           autocomplete="off" inputmode="url">
         <button type="submit" class="secondary">Add</button>
       </form>
+      <dialog id="studio" class="studio">
+        <div class="studio-head">
+          <b>Studio projects</b>
+          <button type="button" id="studio-close" class="ghost" aria-label="Close">✕</button>
+        </div>
+        <input id="studio-search" type="search" placeholder="search all projects" autocomplete="off">
+        <div id="studio-crumbs" class="studio-crumbs"></div>
+        <ul id="studio-list" class="studio-list"></ul>
+      </dialog>
       <h2>Projects</h2>
       <ul id="projects" class="projects"></ul>
     </aside>

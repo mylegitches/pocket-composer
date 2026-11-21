@@ -332,7 +332,7 @@ label.check input { accent-color: var(--accent); }
 .url-form button { padding: 6px 12px; }
 
 .drop { cursor: default; gap: 8px; }
-.pickers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; width: 100%; }
+.pickers { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; width: 100%; }
 .pick {
   display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; font-size: 20px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer;
@@ -351,3 +351,25 @@ label.button:hover { color: var(--ink); border-color: var(--line); }
 .badge.bad { color: #c0392b; }
 .job-note { margin: -2px 0 8px; }
 #job-cancel { padding: 3px 10px; font-size: 12px; }
+
+/* studio library picker */
+.pick[hidden] { display: none; }
+button.pick { font: inherit; font-size: 20px; color: inherit; }
+dialog.studio {
+  width: min(560px, calc(100vw - 32px)); max-height: min(80vh, 720px); padding: 0; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--panel); color: var(--ink); display: none; flex-direction: column;
+}
+dialog.studio[open] { display: flex; }
+dialog.studio::backdrop { background: rgba(0, 0, 0, .4); }
+.studio-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px 6px; }
+#studio-search { margin: 0 14px 6px; }
+.studio-crumbs { padding: 0 14px 6px; font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px; }
+.studio-crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.studio-list { list-style: none; margin: 0; padding: 0 6px 10px; overflow-y: auto; flex: 1; }
+.studio-list li { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
+.studio-list li:hover { background: var(--accent-soft); }
+.studio-list li .nm { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.studio-list li .sub { display: block; font-size: 11px; color: var(--muted); }
+.studio-list li .when { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.studio-list li.note { cursor: default; color: var(--muted); font-size: 13px; }
+.studio-list li.note:hover { background: none; }

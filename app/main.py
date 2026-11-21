@@ -736,6 +736,106 @@ def project_from_url(body: UrlIn) -> dict:
     return _check_new_project(d, stem, name)
 
 
+# --- import from the studio library (a folder of FL Studio projects mounted read-only into the container)
+
+LIBRARY_DIR = Path(os.environ.get("LIBRARY_DIR", "/library"))
+LIBRARY_EXTS = {".flp", ".mid", ".midi", ".musicxml", ".mxl", ".pdf"}
+SKIP_DIRS = {"backup", "@eadir", "#recycle", ".git"}  # FL autosaves, Synology thumbnails, recycle bin
+
+
+def _library_path(rel: str) -> Path:
+    root = LIBRARY_DIR.resolve()
+    if not root.is_dir():
+        raise HTTPException(404, "no studio folder is set up on this server")
+    p = (root / rel.strip("/\\")).resolve()
+    if p != root and root not in p.parents:
+        raise HTTPException(400, "that's outside the studio folder")
+    if not p.exists():
+        raise HTTPException(404, "not found")
+    return p
+
+
+def _lib_entry(p: Path, root: Path) -> dict:
+    st = p.stat()
+    return {"name": p.name, "path": p.relative_to(root).as_posix(), "mtime": int(st.st_mtime),
+            **({} if p.is_dir() else {"size": st.st_size})}
+
+
+@app.get("/api/library")
+def library(path: str = "") -> dict:
+    """List one folder of the studio library: subfolders (newest first) and the files this app can import."""
+    if not LIBRARY_DIR.is_dir():
+        return {"enabled": False}
+    root = LIBRARY_DIR.resolve()
+    d = _library_path(path)
+    if not d.is_dir():
+        raise HTTPException(400, "not a folder")
+    dirs, files = [], []
+    for p in d.iterdir():
+        try:
+            if p.name.startswith("."):
+                continue
+            if p.is_dir():
+                if p.name.lower() not in SKIP_DIRS:
+                    dirs.append(_lib_entry(p, root))
+            elif p.suffix.lower() in LIBRARY_EXTS:
+                files.append(_lib_entry(p, root))
+        except OSError:
+            continue
+    dirs.sort(key=lambda e: -e["mtime"])
+    files.sort(key=lambda e: (Path(e["name"]).suffix.lower() != ".flp", -e["mtime"]))
+    rel = d.relative_to(root).as_posix()
+    return {"enabled": True, "path": "" if rel == "." else rel, "dirs": dirs, "files": files}
+
+
+@app.get("/api/library/search")
+def library_search(q: str, limit: int = 150) -> dict:
+    """Importable files anywhere in the library whose folder or file name contains every word of q."""
+    root = _library_path("")
+    words = [w for w in q.lower().split() if w]
+    if not words:
+        return {"files": [], "more": False}
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [n for n in dirnames if n.lower() not in SKIP_DIRS and not n.startswith(".")]
+        rel_dir = Path(dirpath).relative_to(root).as_posix().lower()
+        for n in filenames:
+            if Path(n).suffix.lower() not in LIBRARY_EXTS:
+                continue
+            hay = f"{rel_dir}/{n.lower()}"
+            if all(w in hay for w in words):
+                try:
+                    out.append(_lib_entry(Path(dirpath) / n, root))
+                except OSError:
+                    continue
+                if len(out) > limit:
+                    break
+        if len(out) > limit:
+            break
+    out.sort(key=lambda e: -e["mtime"])
+    return {"files": out[:limit], "more": len(out) > limit}
+
+
+class LibraryIn(BaseModel):
+    path: str
+
+
+@app.post("/api/projects/from_library")
+def project_from_library(body: LibraryIn) -> dict:
+    """Copy a file from the studio library into a new project (the original is never touched)."""
+    src = _library_path(body.path)
+    ext = src.suffix.lower()
+    if not src.is_file() or ext not in LIBRARY_EXTS:
+        raise HTTPException(400, "pick an FL Studio project, MIDI, MusicXML or PDF file")
+    stem = _safe_name(src.stem)[:80]
+    d = DATA_DIR / stem
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    shutil.copy2(src, d / f"{stem}{ext}")
+    return _check_new_project(d, stem, src.name)
+
+
 @app.post("/api/projects/{name}/pages")
 async def add_pages(name: str, files: list[UploadFile] = File(...)) -> dict:
     """Append photos/PDF pages to a sheet-music project (e.g. shot one at a time on a phone)."""

@@ -93,7 +93,7 @@ MusicXML / MIDI ─────────────────────�
 
 ## Running it
 
-**Docker (recommended).** `docker compose up -d --build` builds an image (about 3 GB) with MuseScore Studio 4.7.6, homr's models and Python. It serves port 8090. `data/` (your inputs and settings) and `output/` (results) are mounted from this folder. To use another MuseScore version, change `MUSESCORE_VERSION` and `MUSESCORE_BUILD` in the `Dockerfile`.
+**Docker (recommended).** `docker compose up -d --build` builds an image (about 3 GB) with MuseScore Studio 4.7.6, homr's models and Python. It serves port 8090. `data/` (your inputs and settings) and `output/` (results) are mounted from this folder. To browse a folder of FL Studio projects from the app, mount it read-only at `/library` (see the commented line in `docker-compose.yml`): a **🎛️ Studio** button then appears next to Files, with folder browsing and search, and importing copies the file in without touching the original. To use another MuseScore version, change `MUSESCORE_VERSION` and `MUSESCORE_BUILD` in the `Dockerfile`.
 
 **Without Docker** (Windows; MuseScore 4 installed):
 

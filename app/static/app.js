@@ -1022,6 +1022,103 @@ async function addPages(fileList) {
   } catch (e) { toast(e.message, true); }
 }
 
+// ---------------------------------------------------------------- studio library (server folder of FL projects)
+
+const ICONS = { ".flp": "🎛️", ".mid": "🎹", ".midi": "🎹", ".pdf": "📄", ".mxl": "🎼", ".musicxml": "🎼" };
+let studioSearchTimer = 0;
+let studioSeq = 0;
+
+function ago(t) {
+  const d = new Date(t * 1000);
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function studioRow(e, isDir, sub) {
+  const li = document.createElement("li");
+  const ext = isDir ? "" : (e.name.match(/\.[^.]+$/)?.[0] || "").toLowerCase();
+  li.innerHTML = `<span>${isDir ? "📁" : ICONS[ext] || "📎"}</span><span class="nm"><span></span><span class="sub"></span></span><span class="when"></span>`;
+  li.querySelector(".nm span").textContent = e.name;
+  li.querySelector(".sub").textContent = sub || "";
+  li.querySelector(".when").textContent = ago(e.mtime);
+  li.onclick = () => (isDir ? studioOpen(e.path) : studioImport(e));
+  return li;
+}
+
+function studioNote(text) {
+  const li = document.createElement("li");
+  li.className = "note";
+  li.textContent = text;
+  return li;
+}
+
+async function studioOpen(path = "") {
+  const seq = ++studioSeq;
+  const ul = $("#studio-list");
+  ul.replaceChildren(studioNote("Loading…"));
+  try {
+    const r = await api(`/api/library?path=${encodeURIComponent(path)}`);
+    if (seq !== studioSeq) return;
+    $("#studio").dataset.path = r.path;
+    const crumbs = $("#studio-crumbs");
+    crumbs.replaceChildren();
+    const parts = r.path ? r.path.split("/") : [];
+    [["Projects", ""], ...parts.map((p, i) => [p, parts.slice(0, i + 1).join("/")])].forEach(([label, to], i, all) => {
+      if (i) crumbs.append(" / ");
+      const a = document.createElement(i === all.length - 1 ? "span" : "a");
+      a.textContent = label;
+      if (i < all.length - 1) a.onclick = () => studioOpen(to);
+      crumbs.append(a);
+    });
+    ul.replaceChildren(...r.files.map((f) => studioRow(f, false)), ...r.dirs.map((d) => studioRow(d, true)));
+    if (!r.files.length && !r.dirs.length) ul.append(studioNote("Nothing to import in this folder."));
+    ul.scrollTop = 0;
+  } catch (e) { ul.replaceChildren(studioNote(e.message)); }
+}
+
+async function studioSearch(q) {
+  if (!q.trim()) return studioOpen("");
+  const seq = ++studioSeq;
+  const ul = $("#studio-list");
+  ul.replaceChildren(studioNote("Searching…"));
+  try {
+    const r = await api(`/api/library/search?q=${encodeURIComponent(q)}`);
+    if (seq !== studioSeq) return;
+    $("#studio-crumbs").textContent = `${r.files.length}${r.more ? "+" : ""} match${r.files.length === 1 ? "" : "es"}`;
+    ul.replaceChildren(...r.files.map((f) => studioRow(f, false, f.path.split("/").slice(0, -1).join(" / "))));
+    if (!r.files.length) ul.append(studioNote("No projects match."));
+  } catch (e) { ul.replaceChildren(studioNote(e.message)); }
+}
+
+async function studioImport(e) {
+  $("#studio").close();
+  toast(`Importing ${e.name}…`);
+  try {
+    const p = await api("/api/projects/from_library", { method: "POST", body: JSON.stringify({ path: e.path }) });
+    await loadProjects();
+    const h = "#" + encodeURIComponent(p.name);
+    if (location.hash === h) openProject(p.name); else location.hash = h;
+  } catch (err) { toast(err.message, true); }
+}
+
+async function initStudio() {
+  try {
+    const r = await api("/api/library");
+    if (!r.enabled) return;
+  } catch { return; }
+  $("#pick-studio").hidden = false;
+  $("#pick-studio").onclick = () => {
+    $("#studio").showModal();
+    const q = $("#studio-search").value;
+    q.trim() ? studioSearch(q) : studioOpen($("#studio").dataset.path || "");
+  };
+  $("#studio-close").onclick = () => $("#studio").close();
+  $("#studio").onclick = (e) => { if (e.target === $("#studio")) $("#studio").close(); }; // backdrop
+  $("#studio-search").oninput = (e) => {
+    clearTimeout(studioSearchTimer);
+    studioSearchTimer = setTimeout(() => studioSearch(e.target.value), 300);
+  };
+}
+
 // ---------------------------------------------------------------- startup
 
 async function init() {
@@ -1031,6 +1128,7 @@ async function init() {
   for (const id of ["#upload", "#pick-photos", "#pick-camera"]) $(id).onchange = (e) => upload(e.target.files);
   $("#add-pages").onchange = (e) => addPages(e.target.files);
   document.addEventListener("paste", onPaste);
+  initStudio();
   $("#suggest").onclick = suggest;
   $("#url-form").onsubmit = async (e) => {
     e.preventDefault();

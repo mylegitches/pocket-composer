@@ -8,4 +8,6 @@ services:
     volumes:
       - ./data:/app/data     # projects: data/<name>/<name>.flp (+ mapping.json)
       - ./output:/app/output # scores
+      # Optional: a folder of FL Studio projects to browse with the Studio button (read-only)
+      # - /path/to/FL Studio/Projects:/library:ro
     restart: unless-stopped
