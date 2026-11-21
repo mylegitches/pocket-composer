@@ -3,16 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pocket Composer</title>
-  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <title>PocketComposer</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-180.png">
   <link rel="manifest" href="/static/manifest.webmanifest">
-  <meta name="theme-color" content="#e0632a">
+  <meta name="theme-color" content="#0f1117">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/static/icon.svg" alt="" width="28" height="28"> Pocket Composer <span class="sub">any music → MuseScore</span></div>
+    <div class="brand"><img class="logo" src="/static/icon.svg" alt="" width="28" height="28"> PocketComposer <span class="sub">any music → MuseScore</span></div>
     <div class="top-right">
       <div id="health" class="health"></div>
       <a id="open-settings" class="top-link" href="#:settings">⚙ Settings</a>
@@ -76,6 +77,9 @@
           <p class="muted">Reads sheet-music pages (title, instrument names, which pages make up each part, clef and
             key) and suggests instruments for FL Studio channels. The notes themselves are read by homr, a recognition
             model that runs inside this app, so they don't depend on the AI.</p>
+          <p class="muted small">Works with any OpenAI-compatible endpoint (and the Ollama, Claude and Gemini APIs).
+            <b>What gets sent:</b> page images (at most 1600 px) and tab photos, plus FL channel names and note ranges
+            when you press Suggest instruments. Nothing else leaves this server. Use a local model to keep it all at home.</p>
           <div class="form-grid">
             <label>Service <select id="ai-preset"></select></label>
             <label>Endpoint URL <input id="ai-url" placeholder="https://…" autocomplete="off"></label>
@@ -124,6 +128,7 @@
             <button id="suggest" class="secondary flp-only" title="Ask the AI endpoint to pick instruments">✨ Suggest instruments</button>
             <button id="reset" class="ghost flp-only" title="Forget saved choices and use the automatic guesses">Reset to guesses</button>
             <button id="save" class="secondary flp-only">Save mapping</button>
+            <button id="rename" class="ghost" title="Change the name this piece has in the list and on its downloads">✎ Rename</button>
             <button id="delete" class="ghost danger" title="Delete this project and its output">Delete</button>
           </div>
         </div>

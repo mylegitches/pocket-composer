@@ -246,6 +246,7 @@ async function loadProjects() {
     li.querySelector(".kind").textContent = KIND_ICON[p.kind] || "";
     li.querySelector(".pl-name span:last-child").textContent = p.name;
     li.onclick = () => { location.hash = encodeURIComponent(p.name); };
+    li.ondblclick = (e) => { e.preventDefault(); renameProject(p.name); }; // desktop shortcut; phones use ✎ Rename
     if (p.name === state.current) li.classList.add("active");
     ul.append(li);
   }
@@ -264,7 +265,14 @@ async function loadProjects() {
   }
 }
 
+// Page titles follow the house style "Section · Product".
+function setTitle(section) {
+  document.title = section ? `${section} · PocketComposer` : "PocketComposer";
+}
+
 function showPage(which) {
+  if (which === "settings") setTitle("Settings");
+  else if (which === "empty") setTitle("");
   for (const id of ["empty", "project", "settings"]) $("#" + id).hidden = id !== which;
   $("#open-settings").classList.toggle("active", which === "settings");
   if (which !== "project") document.querySelectorAll("#projects li").forEach((li) => li.classList.remove("active"));
@@ -313,6 +321,7 @@ async function openProject(name) {
 function render(p) {
   state.project = p;
   showPage("project");
+  setTitle(p.name);
   const kind = p.kind;
   document.querySelectorAll(".flp-only").forEach((el) => { el.hidden = kind !== "flp"; });
   $("#suggest").hidden = kind !== "flp" || !p.ai?.configured;
@@ -603,6 +612,24 @@ async function suggest() {
     toast(`AI suggestions filled in (${changed} instrument change${changed === 1 ? "" : "s"}). Save or Convert to keep them.`);
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; btn.textContent = label; }
+}
+
+async function renameProject(name = state.current) {
+  if (!name) return;
+  const next = prompt("New name for this piece:", name);
+  if (next === null || !next.trim() || next.trim() === name) return;
+  try {
+    const p = await api(`/api/projects/${encodeURIComponent(name)}/rename`, {
+      method: "POST", body: JSON.stringify({ name: next.trim() }),
+    });
+    delete lastStates[name];
+    await loadProjects();
+    toast(`Renamed to ${p.name}`);
+    const h = "#" + encodeURIComponent(p.name);
+    if (state.current === name || location.hash === "#" + encodeURIComponent(name)) {
+      if (location.hash === h) openProject(p.name); else location.hash = h;
+    }
+  } catch (e) { toast(e.message, true); }
 }
 
 async function deleteProject() {
@@ -1148,6 +1175,7 @@ async function init() {
     finally { btn.disabled = false; btn.textContent = "Add"; }
   };
   $("#delete").onclick = deleteProject;
+  $("#rename").onclick = () => renameProject();
   $("#detect-ai").onclick = () => detectParts(true);
   $("#detect-ocr").onclick = () => detectParts(false);
   $("#save-plan").onclick = () => savePlan();

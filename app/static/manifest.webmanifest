@@ -1,11 +1,11 @@
 {
-  "name": "Pocket Composer",
-  "short_name": "Pocket Composer",
+  "name": "PocketComposer",
+  "short_name": "PocketComposer",
   "description": "Turn any music into a MuseScore score.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#17171a",
-  "theme_color": "#e0632a",
+  "background_color": "#0f1117",
+  "theme_color": "#0f1117",
   "icons": [
     {"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"},
     {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},

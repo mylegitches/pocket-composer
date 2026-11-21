@@ -50,7 +50,7 @@ TAB_EXTS = {".html", ".htm", ".json"}
 UPLOAD_EXTS = {".flp"} | SCAN_EXTS | SCORE_EXTS | TAB_EXTS
 META_FILES = {"parts.json", "mode.json", "mapping.json", "tracks.json"}  # our own files in a project folder
 
-app = FastAPI(title="Pocket Composer")
+app = FastAPI(title="PocketComposer")
 _preview_lock = threading.Lock()  # one instrument sample render at a time
 
 
@@ -895,6 +895,63 @@ def delete_project(name: str) -> dict:
         JOBS.pop(jid, None)
         (JOBS_DIR / f"{jid}.json").unlink(missing_ok=True)
     return {"ok": True}
+
+
+class RenameIn(BaseModel):
+    name: str
+
+
+@app.post("/api/projects/{name}/rename")
+def rename_project(name: str, body: RenameIn) -> dict:
+    """Give a piece a new name: its input folder, its outputs and its job history all move with it.
+
+    The input file and the output files are renamed too when they carry the old name, so downloads
+    come out under the new name. The score's own title is separate (it's set in the piece itself)."""
+    d = _project_dir(name)
+    new = _safe_name(body.name.strip())[:80]
+    if new == name:
+        return _summary(name)
+    if _active_job(name):
+        raise HTTPException(409, "wait for the running job to finish")
+    if (DATA_DIR / new).exists() or (OUTPUT_DIR / new).exists():
+        raise HTTPException(409, f"there's already a piece called {new!r}")
+    kind, files = _sources(d)
+    old_stem = _stem(name, kind, files) if kind else name
+
+    nd = DATA_DIR / new
+    d.rename(nd)
+    for f in nd.iterdir():  # single input files are named after the piece: "<name>.flp" etc.
+        if f.is_file() and f.stem == name and f.name not in META_FILES:
+            f.rename(nd / f"{new}{f.suffix}")
+    kind, files = _sources(nd)
+    new_stem = _stem(new, kind, files) if kind else new
+
+    out, nout = OUTPUT_DIR / name, OUTPUT_DIR / new
+    if out.is_dir():
+        out.rename(nout)
+        if new_stem != old_stem:
+            for f in nout.iterdir():
+                if f.is_file() and (f.name.startswith(old_stem + ".") or f.name.startswith(old_stem + "-")):
+                    f.rename(nout / (new_stem + f.name[len(old_stem):]))
+
+    # Jobs keep pointing at the piece; their saved results hold download links with the old names.
+    from urllib.parse import quote
+
+    for j in JOBS.values():
+        if j["project"] != name:
+            continue
+        j["project"] = new
+        if j.get("result"):
+            txt = json.dumps(j["result"])
+            for a, b in ((name, new), (quote(name), quote(new))):
+                txt = txt.replace(f"/api/projects/{a}/", f"/api/projects/{b}/")
+            if new_stem != old_stem:
+                for sep in (".", "-"):
+                    for pre in ("/", '"'):
+                        txt = txt.replace(f"{pre}{old_stem}{sep}", f"{pre}{new_stem}{sep}")
+            j["result"] = json.loads(txt)
+        _save_job(j)
+    return _summary(new)
 
 
 class MappingIn(BaseModel):

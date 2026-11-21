@@ -1,8 +1,8 @@
-<p align="center"><img src="app/static/icon.svg" width="120" alt="Pocket Composer: a music note popping out of a pocket"></p>
+<p align="center"><img src="app/static/icon.svg" width="120" alt="PocketComposer: a music note popping out of a pocket"></p>
 
-# Pocket Composer
+# PocketComposer
 
-**Turn any music into a MuseScore score.** Give it a photo of a lead sheet, a scanned PDF of a band chart, a picture of a guitar tab, a link to a tab page, a MusicXML or MIDI file, or an FL Studio project. Pocket Composer gives you back an editable MuseScore project (`.mscz`), plus a PDF, audio, MusicXML, MIDI and Guitar Pro. It runs in Docker, opens in any browser (phones too), and engraves with a headless copy of MuseScore Studio 4.
+**Turn any music into a MuseScore score.** Give it a photo of a lead sheet, a scanned PDF of a band chart, a picture of a guitar tab, a link to a tab page, a MusicXML or MIDI file, or an FL Studio project. PocketComposer gives you back an editable MuseScore project (`.mscz`), plus a PDF, audio, MusicXML, MIDI and Guitar Pro. It runs in Docker, opens in any browser (phones too), and engraves with a headless copy of MuseScore Studio 4.
 
 ```
 docker compose up -d --build        # then open http://localhost:8090
@@ -43,6 +43,8 @@ Everything you choose is saved on the server, so the phone and the computer see 
 
 ## AI endpoint (bring your own)
 
+PocketComposer works with **any OpenAI-compatible endpoint**, and also speaks the Ollama, Claude and Gemini APIs directly. Nothing is hard-wired: you pick the service and the model.
+
 Reading notes doesn't need AI. **homr**, an optical music recognition model, runs inside the container and reads the notes on sheet-music pages. An AI model does the jobs that need judgement:
 
 | Job | Needs |
@@ -64,7 +66,15 @@ Without an AI model, OCR finds the parts in sheet music and everything else stil
 
 **List models** shows which models can read images ("· vision"). You can set one main model, or a different model for each job. Each job has a **Test** button that sends a sample page with a known answer and scores the reply. On Ollama Cloud (November 2026), `kimi-k3.1-pro` scored 100% on all three tests. It read the sample page in 4 s and the 16-note bass tab in about 45 s.
 
-The API key is stored in `data/settings.json` on the server (git-ignored) and is never sent back to the browser. The app has no login, so only run it on a network you trust.
+The API key is stored in `data/settings.json` on the server (git-ignored) and is never sent back to the browser. The app has no login, so only run it on a network you trust, or put it behind a login.
+
+### What leaves your server
+
+Everything runs in the container: page rendering, note recognition (homr), FL Studio reading and MuseScore engraving. Only these things go out:
+
+- **To your AI endpoint, only if you set one:** sheet-music page images, at most 1600 px, for finding parts; tab photos, for reading tabs; and FL Studio channel names and note ranges, for **Suggest instruments**. With a local Ollama, nothing leaves your network.
+- **Links you paste:** the server downloads that one file or page. For Songsterr it also fetches the track data from Songsterr. Links to your own network are refused.
+- Nothing else: no analytics, no accounts, no telemetry.
 
 ## How it works
 
@@ -114,3 +124,7 @@ FL Studio projects can also be converted from the command line: `convert.bat dat
 - FL Studio: only piano-roll notes become notation. Audio clips, automation and tempo changes within the song are ignored.
 - Songsterr downloads use Songsterr's public data files and may stop working if Songsterr changes them.
 - Guitar Pro output is `.gp5`. The newer `.gp` format isn't written.
+
+## Look and feel
+
+The UI follows the shared house style: dark first, a forest-green accent, Inter and JetBrains Mono from your installed fonts (no web fonts are downloaded), and the OML mark as the favicon. The in-page mark is the pocket-and-note glyph in `app/static/icon.svg`.
