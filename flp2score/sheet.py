@@ -21,8 +21,20 @@ from musescore_maker.musicxml import PartBuilder, load_measures, write_score
 from . import convert as conv
 
 PLAN_FILE = "parts.json"
+FULL_SCORE = "Full score"  # a part made of full-score pages (several instruments per system)
 MODE_FILE = "mode.json"  # {"read_as": "notation" | "tab"}
 Log = Callable[[str], None]
+
+
+def _full_score_instrument(xml: Path):
+    """A full score's recognised staves: a grand staff (two staves) reads as piano, else a generic part."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        staves = ET.parse(xml).getroot().findtext(".//attributes/staves")
+    except (OSError, ET.ParseError):
+        staves = None
+    return instruments.BY_KEY["PIANO"] if staves == "2" else instruments.GENERIC
 
 
 def safe(name: str) -> str:
@@ -97,6 +109,13 @@ def detect_plan(src_dir: Path, work: Path, title: str, ai_cfg: dict | None, log:
     else:
         log("No AI endpoint set up: reading page headers with OCR…")
         plan = split.detect(page_files, title, log=lambda m: log(m.strip()))
+    if not plan.parts and plan.score_pages:
+        # musescore-maker skips full-score pages because band charts also come as separate parts. When the
+        # whole upload is a full score there's nothing else to read, so read those pages as one part.
+        plan.parts = [split.Part(name=FULL_SCORE, pages=list(plan.score_pages))]
+        plan.score_pages = []
+        log("Only full-score pages: reading them as one part. The recognition model reads the main "
+            "(pitched) staves of each system; percussion staves are left out.")
     save_plan(src_dir, plan)
     return plan
 
@@ -127,6 +146,10 @@ def process(src_dir: Path, work: Path, out_dir: Path, stem: str, formats: list[s
         if not nums:
             continue
         inst, _ = instruments.from_display_name(part.name)
+        label = part.name
+        if part.name.startswith(FULL_SCORE):
+            inst = _full_score_instrument(omr_dir / f"p{nums[0]:03d}.musicxml")
+            label = inst.name if inst is not instruments.GENERIC else part.name
         log(f"Building {part.name} ({inst.name})")
         page_measures = []
         for n in nums:
@@ -138,7 +161,7 @@ def process(src_dir: Path, work: Path, out_dir: Path, stem: str, formats: list[s
             page_measures.append(measures)
         measures = PartBuilder(inst, part.clef, part.fifths, log=lambda m: log(m.strip())).build(page_measures)
         if measures:
-            built.append((part.name, inst, measures))
+            built.append((label, inst, measures))
     res = conv.Result(title=plan.title, out_dir=out_dir,
                       parts=[{"part": n, "instrument": i.name, "notes": sum(len(m.findall(".//note")) for m in ms)}
                              for n, i, ms in built])

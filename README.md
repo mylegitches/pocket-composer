@@ -12,7 +12,7 @@ docker compose up -d --build        # then open http://localhost:8090
 
 | Input | How it gets in | What happens |
 |---|---|---|
-| 📷 **Photos or scans of sheet music** (JPEG, PNG, HEIC, WebP, TIFF; pick several for several pages) | upload, or drag onto the page | Pages are split into instrument parts and the notes are read by a recognition model. You get a full score plus one file per part. |
+| 📷 **Photos or scans of sheet music** (JPEG, PNG, HEIC, WebP, TIFF; pick several for several pages) | **Camera**, **Photos** (your phone's library), **Files**, drag and drop, or paste an image | Pages are split into instrument parts and the notes are read by a recognition model. You get a full score plus one file per part. |
 | 📄 **PDF of sheet music** (band charts, lead sheets, parts) | upload or link | Same as photos, one page at a time. |
 | 🎸 **Photos of a guitar or bass tab** | upload, then choose *tab* | Your AI model writes out every bar's frets and rhythm, which becomes Guitar Pro and then a score. |
 | 🔗 **Songsterr tab page** | paste the link, or upload the saved page | Pick tracks. They're downloaded and turned into Guitar Pro and a score. |
@@ -32,9 +32,11 @@ A **MuseScore.com score page** has no notes in it, so pasting one gets you its o
 
 ## The web app
 
-- **Projects** in the sidebar: upload files, drop them onto the page, or paste a link.
+- **Projects** in the sidebar: take a photo, pick from your phone's photo library or your files, drop files onto the page, paste a link, or paste an image from the clipboard (a screenshot, or "Copy image" on a phone) anywhere on the page. With a sheet-music project open, a pasted image or **+ Add pages** adds pages to it, so you can photograph a chart one page at a time.
 - **Sheet music and tabs**: a Parts table shows which pages belong to which instrument, with clef and key. Page thumbnails are outlined in each part's colour. Fix anything, then **Convert**. Long jobs run in the background with a live progress log.
 - **FL Studio**: one row per channel. Pick from all 644 MuseScore instruments, with ★ favorites on top and collapsible groups. Press ▶ to hear an instrument in MuseScore's own sounds. Channels with the same part name and instrument are merged onto one staff. **✨ Suggest instruments** lets your AI model choose.
+- **Background jobs**: every conversion runs on the server, one at a time, in a queue. You can close the page, switch pieces or use another device. The project list shows each piece's status live (waiting, working %, failed, ✓ scored). Jobs are saved to disk, so after a restart unfinished ones pick up where they left off (pages already read stay cached). Waiting jobs can be cancelled.
+- **Full scores** (several instruments on every system) are read as one part when that's all there is. The recognition model reads the main pitched staves, such as a piano's grand staff; percussion staves are left out.
 - **Settings**: favorite instruments and the AI endpoint.
 
 Everything you choose is saved on the server, so the phone and the computer see the same projects and settings.

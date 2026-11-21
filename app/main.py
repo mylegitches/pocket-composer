@@ -51,9 +51,7 @@ UPLOAD_EXTS = {".flp"} | SCAN_EXTS | SCORE_EXTS | TAB_EXTS
 META_FILES = {"parts.json", "mode.json", "mapping.json", "tracks.json"}  # our own files in a project folder
 
 app = FastAPI(title="Pocket Composer")
-_convert_lock = threading.Lock()  # one MuseScore conversion at a time
 _preview_lock = threading.Lock()  # one instrument sample render at a time
-_job_lock = threading.Lock()  # one background job (OMR / AI) at a time
 
 
 @app.middleware("http")
@@ -162,7 +160,8 @@ def _summary(name: str) -> dict:
         raise HTTPException(404, "project folder has no usable input file")
     stem = _stem(name, kind, files)
     base = {"name": name, "kind": kind, "file": files[0].name, "files": [f.name for f in files],
-            "outputs": _outputs(name, stem), "timeline": _timeline(name, stem), "job": _active_job(name),
+            "outputs": _outputs(name, stem), "timeline": _timeline(name, stem),
+            "job": _active_job(name) or _last_job(name),
             "ai": _ai_public()}
     if kind == "flp":
         base.update(_flp_summary(d, files[0]))
@@ -260,8 +259,37 @@ def _tab_summary(d: Path, f: Path) -> dict:
 
 
 # ---------------------------------------------------------------- background jobs
+#
+# Every conversion and part search is a job. Jobs run one at a time, in order, on a worker thread.
+# Each is saved to output/_jobs/<id>.json as it goes, so the browser can close and the server can
+# restart: unfinished jobs are picked up again on startup (OMR pages already read stay cached).
+# What a job needs (mapping, part plan, chosen tracks) is saved in the project before it is queued.
 
+import queue
+
+JOBS_DIR = OUTPUT_DIR / "_jobs"
 JOBS: dict[str, dict] = {}
+_queue: queue.Queue[str] = queue.Queue()
+_jobs_io = threading.Lock()
+KEEP_JOBS = 60
+JOB_FIELDS = ("id", "project", "kind", "params", "state", "progress", "log", "error", "result", "started",
+              "finished")
+
+
+def _save_job(j: dict, force: bool = True) -> None:
+    now = time.time()
+    if not force and now - j.get("_saved", 0) < 1.0:  # progress/log updates: at most once a second
+        return
+    j["_saved"] = now
+    with _jobs_io:
+        JOBS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = JOBS_DIR / f"{j['id']}.tmp"
+        tmp.write_text(json.dumps({k: j.get(k) for k in JOB_FIELDS}), encoding="utf-8")
+        tmp.replace(JOBS_DIR / f"{j['id']}.json")
+
+
+def _job_public(j: dict) -> dict:
+    return {k: j.get(k) for k in JOB_FIELDS}
 
 
 def _active_job(name: str) -> dict | None:
@@ -271,45 +299,112 @@ def _active_job(name: str) -> dict | None:
     return None
 
 
-def _job_public(j: dict) -> dict:
-    return {k: j[k] for k in ("id", "project", "kind", "state", "progress", "log", "error", "started")}
+def _last_job(name: str) -> dict | None:
+    jobs = [j for j in JOBS.values() if j["project"] == name]
+    return _job_public(max(jobs, key=lambda j: j["started"])) if jobs else None
 
 
-def _start_job(project: str, kind: str, fn) -> dict:
+def _queue_job(project: str, kind: str, params: dict) -> dict:
     if _active_job(project):
-        raise HTTPException(409, "This project is already working on something.")
-    j = {"id": uuid.uuid4().hex[:12], "project": project, "kind": kind, "state": "queued", "progress": 0.0,
-         "log": [], "error": None, "started": time.time()}
+        raise HTTPException(409, "This piece is already working on something.")
+    j = {"id": uuid.uuid4().hex[:12], "project": project, "kind": kind, "params": params, "state": "queued",
+         "progress": 0.0, "log": [], "error": None, "result": None, "started": time.time(), "finished": None}
+    ahead = sum(1 for x in JOBS.values() if x["state"] in ("queued", "running"))
+    if ahead:
+        j["log"].append(f"Waiting for {ahead} other job(s) to finish…")
     JOBS[j["id"]] = j
-    for old in sorted(JOBS.values(), key=lambda x: x["started"])[:-30]:  # keep the list short
-        JOBS.pop(old["id"], None)
-
-    def log(msg: str):
-        msg = msg.strip()
-        if msg:
-            j["log"].append(msg)
-            del j["log"][:-200]
-
-    def run():
-        with _job_lock:
-            j["state"] = "running"
-            try:
-                fn(log, lambda f: j.__setitem__("progress", round(f, 3)))
-                j["state"], j["progress"] = "done", 1.0
-            except Exception as e:  # report anything to the UI rather than dying silently
-                j["state"], j["error"] = "failed", str(e) or e.__class__.__name__
-                log("Failed: " + j["error"])
-                traceback.print_exc()
-
-    threading.Thread(target=run, daemon=True).start()
+    _save_job(j)
+    _prune_jobs()
+    _queue.put(j["id"])
     return _job_public(j)
+
+
+def _prune_jobs() -> None:
+    done = sorted((j for j in JOBS.values() if j["state"] not in ("queued", "running")), key=lambda j: j["started"])
+    for old in done[:-KEEP_JOBS]:
+        JOBS.pop(old["id"], None)
+        (JOBS_DIR / f"{old['id']}.json").unlink(missing_ok=True)
+
+
+def _worker() -> None:
+    while True:
+        j = JOBS.get(_queue.get())
+        if not j or j["state"] != "queued":
+            continue
+
+        def log(msg: str, j=j):
+            msg = msg.strip()
+            if msg:
+                j["log"].append(msg)
+                del j["log"][:-200]
+                _save_job(j, force=False)
+
+        def progress(f: float, j=j):
+            j["progress"] = round(f, 3)
+            _save_job(j, force=False)
+
+        j["state"] = "running"
+        _save_job(j)
+        try:
+            j["result"] = _run_job(j, log, progress)
+            j["state"], j["progress"] = "done", 1.0
+        except Exception as e:  # report anything to the UI rather than dying silently
+            msg = e.detail if isinstance(e, HTTPException) else (str(e) or e.__class__.__name__)
+            j["state"], j["error"] = "failed", msg
+            log("Failed: " + msg)
+            traceback.print_exc()
+        j["finished"] = time.time()
+        _save_job(j)
+
+
+@app.on_event("startup")
+def _load_jobs() -> None:
+    """Reload saved jobs; anything that was queued or running when the server stopped goes back in the queue."""
+    if JOBS_DIR.is_dir():
+        for f in JOBS_DIR.glob("*.json"):
+            try:
+                j = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not (DATA_DIR / j.get("project", "")).is_dir():
+                f.unlink(missing_ok=True)  # the piece was deleted
+                continue
+            JOBS[j["id"]] = j
+        for tmp in JOBS_DIR.glob("*.tmp"):
+            tmp.unlink(missing_ok=True)
+    resume = sorted((j for j in JOBS.values() if j["state"] in ("queued", "running")), key=lambda j: j["started"])
+    for j in resume:
+        j["state"] = "queued"
+        j["log"].append("The server restarted: picking this up again.")
+        _save_job(j)
+        _queue.put(j["id"])
+    threading.Thread(target=_worker, daemon=True, name="jobs").start()
+
+
+@app.get("/api/jobs")
+def list_jobs() -> list[dict]:
+    return [_job_public(j) for j in sorted(JOBS.values(), key=lambda j: -j["started"])]
 
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     j = JOBS.get(job_id)
     if not j:
-        raise HTTPException(404, "no such job (the server may have restarted)")
+        raise HTTPException(404, "no such job")
+    return _job_public(j)
+
+
+@app.delete("/api/jobs/{job_id}")
+def cancel_job(job_id: str) -> dict:
+    """Take a job out of the queue before it starts (a running job finishes)."""
+    j = JOBS.get(job_id)
+    if not j:
+        raise HTTPException(404, "no such job")
+    if j["state"] != "queued":
+        raise HTTPException(409, "only waiting jobs can be cancelled")
+    j["state"], j["error"], j["finished"] = "failed", "Cancelled", time.time()
+    j["log"].append("Cancelled.")
+    _save_job(j)
     return _job_public(j)
 
 
@@ -483,9 +578,11 @@ def list_projects() -> list[dict]:
         if not kind:
             continue
         outs = _outputs(d.name, _stem(d.name, kind, files))
+        last = _last_job(d.name)
         out.append({"name": d.name, "kind": kind, "file": files[0].name,
-                    "converted": any(o["kind"] == "mscz" and not o["part"] for o in outs),
-                    "busy": _active_job(d.name) is not None})
+                    "converted": any(o["kind"] in ("mscz", "pdf", "mp3") and not o["part"] for o in outs),
+                    "busy": _active_job(d.name) is not None,
+                    "job": {k: last[k] for k in ("id", "kind", "state", "progress", "error")} if last else None})
     return out
 
 
@@ -639,6 +736,38 @@ def project_from_url(body: UrlIn) -> dict:
     return _check_new_project(d, stem, name)
 
 
+@app.post("/api/projects/{name}/pages")
+async def add_pages(name: str, files: list[UploadFile] = File(...)) -> dict:
+    """Append photos/PDF pages to a sheet-music project (e.g. shot one at a time on a phone)."""
+    d = _project_dir(name)
+    kind, srcs = _sources(d)
+    if kind != "scan":
+        raise HTTPException(400, "pages can only be added to a PDF / photo project")
+    if _active_job(name):
+        raise HTTPException(409, "wait for the running job to finish")
+    files = [f for f in files if f.filename]
+    exts = [Path(f.filename).suffix.lower() or ".png" for f in files]
+    if not files or any(e not in SCAN_EXTS for e in exts):
+        raise HTTPException(400, "add photos or PDFs")
+    # Number every input so the pages stay in order: existing ones first, then the new ones.
+    for i, src in enumerate(srcs, 1):
+        want = d / f"{i:03d}{src.suffix.lower()}"
+        if src != want:
+            src.rename(want)
+    for i, (f, ext) in enumerate(zip(files, exts), len(srcs) + 1):
+        with (d / f"{i:03d}{ext}").open("wb") as fh:
+            shutil.copyfileobj(f.file, fh)
+    (d / sheet.PLAN_FILE).unlink(missing_ok=True)  # pages changed: find the parts again
+    work = _work(name)
+    if work.exists():
+        shutil.rmtree(work)
+    try:
+        sheet.render_pages(d, work)
+    except Exception as e:
+        raise HTTPException(400, f"couldn't read the new pages: {e}") from e
+    return _summary(name)
+
+
 @app.get("/api/projects/{name}")
 def get_project(name: str) -> dict:
     return _summary(name)
@@ -651,6 +780,9 @@ def delete_project(name: str) -> dict:
         raise HTTPException(409, "wait for the running job to finish")
     shutil.rmtree(d)
     shutil.rmtree(OUTPUT_DIR / name, ignore_errors=True)
+    for jid in [k for k, j in JOBS.items() if j["project"] == name]:
+        JOBS.pop(jid, None)
+        (JOBS_DIR / f"{jid}.json").unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -755,10 +887,9 @@ def detect(name: str, body: DetectIn) -> dict:
     d = _project_dir(name)
     if _sources(d)[0] != "scan":
         raise HTTPException(400, "part detection is for PDFs and photos")
-    cfg = _ai_cfg() if body.use_ai else None
-    if body.use_ai and not ai.configured(cfg):
+    if body.use_ai and not ai.configured(_ai_cfg()):
         raise HTTPException(400, "No AI endpoint is set up yet: add one on the Settings page, or use OCR.")
-    return _start_job(name, "detect", lambda log, prog: sheet.detect_plan(d, _work(name), name, cfg, log))
+    return _queue_job(name, "detect", {"use_ai": body.use_ai})
 
 
 # --- converting
@@ -772,59 +903,58 @@ class ConvertIn(BaseModel):
 
 @app.post("/api/projects/{name}/convert")
 def run_convert(name: str, body: ConvertIn) -> dict:
+    """Save the choices sent with the request, then queue the conversion as a background job."""
     d = _project_dir(name)
-    kind, files = _sources(d)
-    formats = [x for x in body.formats if x in FORMATS]
+    kind, _files = _sources(d)
     if not export.find_musescore():
         raise HTTPException(500, "MuseScore is not installed in this environment")
+    if kind == "scan" and sheet.read_as(d) == "tab" and not ai.configured(_ai_cfg()):
+        raise HTTPException(400, "Reading tab from photos needs an AI endpoint: set one up on the Settings page.")
+    if kind == "scan" and body.plan is not None and sheet.read_as(d) != "tab":
+        save_plan(name, body.plan)
+    if kind == "flp" and body.mapping is not None:
+        mapping.save(d, mapping.Mapping.from_json(body.mapping.model_dump()))
+    if kind == "tab" and body.tracks:
+        (d / "tracks.json").write_text(json.dumps(body.tracks), encoding="utf-8")
+    job = _queue_job(name, "convert", {"formats": [x for x in body.formats if x in FORMATS]})
+    summary = _summary(name)
+    summary["job"] = job
+    return summary
+
+
+def _run_job(j: dict, log, progress) -> dict | None:
+    """Do a job's work. Everything it needs is read from the project folder and the job's params."""
+    name, params = j["project"], j.get("params") or {}
+    d = DATA_DIR / name
+    if not d.is_dir():
+        raise RuntimeError("the piece was deleted")
+    kind, files = _sources(d)
     out_dir = OUTPUT_DIR / name
+    if j["kind"] == "detect":
+        cfg = _ai_cfg() if params.get("use_ai") else None
+        plan = sheet.detect_plan(d, _work(name), name, cfg, log)
+        return {"parts": [{"part": p.name, "instrument": f"pages {p.pages[0]}–{p.pages[-1]}", "notes": "—"}
+                          for p in plan.parts], "failed": []}
 
+    formats = params.get("formats") or ["mscz", "pdf"]
     if kind == "scan" and sheet.read_as(d) == "tab":
+        res = sheet.process_tab(d, _work(name), out_dir, name, formats, _ai_cfg(), log, progress)
+    elif kind == "scan":
         cfg = _ai_cfg()
-        if not ai.configured(cfg):
-            raise HTTPException(400, "Reading tab from photos needs an AI endpoint: set one up on the Settings page.")
-
-        def tab_job(log, prog):
-            with _convert_lock:
-                res = sheet.process_tab(d, _work(name), out_dir, name, formats, cfg, log, prog)
-            if res.failed:
-                log("MuseScore could not write: " + ", ".join(res.failed))
-            log("Done.")
-
-        summary = _summary(name)
-        summary["job"] = _start_job(name, "tab", tab_job)
-        return summary
-
-    if kind == "scan":
-        if body.plan is not None:
-            save_plan(name, body.plan)
-        cfg = _ai_cfg()
-        use_ai = cfg.get("use_for_parts", True) and ai.configured(cfg)
-
-        def job(log, prog):
-            if sheet.load_plan(d) is None:
-                sheet.detect_plan(d, _work(name), name, cfg if use_ai else None, log)
-            with _convert_lock:
-                res = sheet.process(d, _work(name), out_dir, name, formats, log, prog)
-            if res.failed:
-                log("MuseScore could not write: " + ", ".join(res.failed))
-            log(f"Done: {len(res.parts)} part(s).")
-
-        summary = _summary(name)
-        summary["job"] = _start_job(name, "convert", job)
-        return summary
-
-    if kind == "flp":
-        if body.mapping is not None:
-            mapping.save(d, mapping.Mapping.from_json(body.mapping.model_dump()))
-        with _convert_lock:
-            res = convert(files[0], out_dir, formats, mapping.load(d))
+        if sheet.load_plan(d) is None:
+            use_ai = cfg.get("use_for_parts", True) and ai.configured(cfg)
+            sheet.detect_plan(d, _work(name), name, cfg if use_ai else None, log)
+        res = sheet.process(d, _work(name), out_dir, name, formats, log, progress)
+    elif kind == "flp":
+        log("Building the score from the FL Studio project…")
+        progress(0.2)
+        res = convert(files[0], out_dir, formats, mapping.load(d))
     elif kind == "tab":
         from tabmaker import gpsong, songsterr, songsterr_song
 
         meta = _read_tab_source(files[0])
-        ids = body.tracks if body.tracks else _tab_tracks(d, meta)
-        (d / "tracks.json").write_text(json.dumps(ids), encoding="utf-8")
+        ids = _tab_tracks(d, meta)
+        log(f"Getting {len(ids)} track(s)…")
         try:
             if meta["kind"] == "songsterr-json":
                 parts = [json.loads(files[0].read_bytes())]
@@ -832,24 +962,27 @@ def run_convert(name: str, body: ConvertIn) -> dict:
                 parts = songsterr.fetch_parts_sync(meta, ids)
             song = songsterr_song.build_song(parts, meta.get("title", ""), meta.get("artist", ""), meta.get("tempo"))
         except (songsterr.SongsterrError, ValueError, KeyError) as e:
-            raise HTTPException(502, f"Couldn't build the tab: {e}") from e
+            raise RuntimeError(f"Couldn't build the tab: {e}") from e
         gp = _work(name) / "tab.gp5"
         gp.parent.mkdir(parents=True, exist_ok=True)
         gp.write_bytes(gpsong.to_gp5_bytes(song))
-        with _convert_lock:
-            res = export_file(gp, out_dir, name, formats, title=meta.get("title") or name)
+        progress(0.3)
+        log("MuseScore: writing the score…")
+        res = export_file(gp, out_dir, name, formats, title=meta.get("title") or name)
         res.parts = [{"part": t.name, "instrument": "tab",
                       "notes": sum(len(b.notes) for m in t.measures for v in m.voices for b in v.beats)}
                      for t in song.tracks]
     else:  # MusicXML / MIDI: MuseScore reads it directly
-        with _convert_lock:
-            res = export_file(files[0], out_dir, name, formats)
-            res.parts = [{"part": "score", "instrument": files[0].suffix.lstrip(".").upper(), "notes": "—"}]
-    summary = _summary(name)
-    summary["result"] = {"parts": res.parts, "failed": res.failed,
-                         "message": None if res.parts else
-                         "No piano-roll notes on the playlist: nothing to notate (audio clips can't be scored)."}
-    return summary
+        log("MuseScore: writing the score…")
+        progress(0.2)
+        res = export_file(files[0], out_dir, name, formats)
+        res.parts = [{"part": "score", "instrument": files[0].suffix.lstrip(".").upper(), "notes": "—"}]
+    if res.failed:
+        log("MuseScore could not write: " + ", ".join(res.failed))
+    if not res.parts:
+        raise RuntimeError("Nothing to notate: no notes were found (audio clips can't be scored).")
+    log(f"Done: {len(res.parts)} part(s).")
+    return {"parts": res.parts, "failed": res.failed}
 
 
 @app.get("/api/projects/{name}/files/{filename:path}")

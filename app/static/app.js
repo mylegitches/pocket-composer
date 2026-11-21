@@ -215,15 +215,34 @@ function setRowInstrument(tr, id, drumValue) {
 
 // ---------------------------------------------------------------- projects
 
+let listTimer = 0;
+const lastStates = {};
+
+function jobBadge(p) {
+  const j = p.job;
+  if (j?.state === "running") {
+    const what = j.kind === "detect" ? "finding parts" : "working";
+    return { text: j.progress ? `${what} ${Math.round(j.progress * 100)}%` : `${what}…`, cls: "busy", spin: true };
+  }
+  if (j?.state === "queued") return { text: "waiting", cls: "busy", spin: false };
+  if (j?.state === "failed") return { text: j.error === "Cancelled" ? "cancelled" : "⚠ failed", cls: "bad", title: j.error };
+  if (p.converted) return { text: "✓ scored", cls: "done" };
+  return { text: "", cls: "" };
+}
+
 async function loadProjects() {
-  const list = await api("/api/projects");
+  clearTimeout(listTimer);
+  let list;
+  try { list = await api("/api/projects"); } catch (e) { listTimer = setTimeout(loadProjects, 5000); return; }
   const ul = $("#projects");
   ul.innerHTML = "";
   for (const p of list) {
     const li = document.createElement("li");
     li.dataset.name = p.name;
-    const badge = p.busy ? "working…" : p.converted ? "✓ scored" : "";
-    li.innerHTML = `<span class="pl-name"><span class="kind"></span><span></span></span><span class="badge ${p.converted ? "done" : ""}">${badge}</span>`;
+    const b = jobBadge(p);
+    li.innerHTML = `<span class="pl-name"><span class="kind"></span><span></span></span><span class="badge ${b.cls}">${b.spin ? '<span class="spinner"></span>' : ""}<span></span></span>`;
+    li.querySelector(".badge span:last-child").textContent = b.text;
+    if (b.title) li.title = b.title;
     li.querySelector(".kind").textContent = KIND_ICON[p.kind] || "";
     li.querySelector(".pl-name span:last-child").textContent = p.name;
     li.onclick = () => { location.hash = encodeURIComponent(p.name); };
@@ -231,6 +250,18 @@ async function loadProjects() {
     ul.append(li);
   }
   if (!list.length) ul.innerHTML = `<li class="badge">No projects yet</li>`;
+  // A piece's job finished while it's open (started on another device, or after a restart): show the result.
+  for (const p of list) {
+    const st = p.job?.state;
+    const was = lastStates[p.name];
+    lastStates[p.name] = st;
+    if (p.name === state.current && was && was !== st && (st === "done" || st === "failed") && p.job.id !== shownFinished) {
+      api(`/api/jobs/${p.job.id}`).then(jobFinished).catch(() => {});
+    }
+  }
+  if (list.some((p) => p.job && (p.job.state === "running" || p.job.state === "queued"))) {
+    listTimer = setTimeout(loadProjects, 2500);
+  }
 }
 
 function showPage(which) {
@@ -297,7 +328,8 @@ function render(p) {
     $("#meta").textContent = `${p.file} · converted as-is by MuseScore`;
   }
   renderOutputs(p);
-  showJob(p.job);
+  // Show the job card while it runs, or if the last one failed; a finished job's card isn't needed.
+  showJob(p.job && p.job.state !== "done" ? p.job : null);
 }
 
 function renderFlp(p) {
@@ -490,6 +522,7 @@ async function detectParts(useAi) {
     showJob(await api(`/api/projects/${encodeURIComponent(state.current)}/detect`, {
       method: "POST", body: JSON.stringify({ use_ai: useAi }),
     }));
+    loadProjects();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -504,10 +537,16 @@ function showJob(job) {
   box.hidden = false;
   const running = job.state === "queued" || job.state === "running";
   $("#job-spin").hidden = !running;
-  $("#job-title").textContent = {
-    detect: "Finding the parts", convert: "Reading the notes and writing the score",
-    tab: "Reading the tab with the AI and writing the score",
-  }[job.kind] + (job.state === "queued" ? " (waiting for another job)" : job.state === "failed" ? " — failed" : job.state === "done" ? " — done" : "…");
+  const p = state.project;
+  const what = job.kind === "detect" ? "Finding the parts"
+    : p?.kind === "scan" && p.read_as === "tab" ? "Reading the tab with the AI and writing the score"
+    : p?.kind === "scan" ? "Reading the notes and writing the score" : "Writing the score";
+  $("#job-title").textContent = what + (job.state === "queued" ? " (waiting its turn)" : job.state === "failed"
+    ? (job.error === "Cancelled" ? " — cancelled" : " — failed") : job.state === "done" ? " — done" : "…");
+  $("#job-cancel").hidden = job.state !== "queued";
+  $("#job-cancel").onclick = async () => {
+    try { showJob(await api(`/api/jobs/${job.id}`, { method: "DELETE" })); loadProjects(); } catch (e) { toast(e.message, true); }
+  };
   $("#job-pct").textContent = running && job.progress ? `${Math.round(job.progress * 100)}%` : "";
   $("#job-bar").style.width = `${Math.round((job.state === "done" ? 1 : job.progress) * 100)}%`;
   box.classList.toggle("failed", job.state === "failed");
@@ -523,14 +562,19 @@ function showJob(job) {
         if (state.current !== job.project) return;
         if (j.state === "done" || j.state === "failed") return jobFinished(j);
         showJob(j);
-      } catch (e) { toast(e.message, true); }
+      } catch (e) { jobTimer = setTimeout(() => showJob(job), 4000); } // server restarting: keep trying
     }, 1500);
   }
 }
 
+let shownFinished = null;
+
 async function jobFinished(job) {
+  if (shownFinished === job.id) return;
+  shownFinished = job.id;
   await openProject(job.project);
   showJob(job);
+  if (job.result && job.kind === "convert") renderOutputs(state.project, job.result);
   loadProjects();
   if (job.state === "failed") toast(job.error || "The job failed", true);
   else if (job.kind === "convert") $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -912,10 +956,9 @@ async function convert() {
       method: "POST", body: JSON.stringify(body),
     });
     render(p);
+    showJob(p.job);
     loadProjects();
-    if (p.job) { $("#job").scrollIntoView({ behavior: "smooth", block: "start" }); return; }
-    renderOutputs(p, p.result);
-    $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("#job").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -937,7 +980,46 @@ async function upload(fileList) {
     const h = "#" + encodeURIComponent(p.name);
     if (location.hash === h) openProject(p.name); else location.hash = h;
   } catch (e) { toast(e.message, true); }
-  $("#upload").value = "";
+  for (const id of ["#upload", "#pick-photos", "#pick-camera"]) $(id).value = "";
+}
+
+// Images on the clipboard (a screenshot, "Copy image" on a phone) become pages. With a sheet-music
+// project open you can add them to it; otherwise they start a new project.
+function clipboardImages(e) {
+  const out = [];
+  for (const item of e.clipboardData?.items || []) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const f = item.getAsFile();
+      if (f) out.push(f);
+    }
+  }
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  return out.map((f, i) => new File([f], `pasted-${stamp}${out.length > 1 ? "-" + (i + 1) : ""}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: f.type }));
+}
+
+async function onPaste(e) {
+  const imgs = clipboardImages(e);
+  if (!imgs.length) return; // ordinary text paste: leave it alone
+  e.preventDefault();
+  const p = state.project;
+  if (p && p.kind === "scan" && !$("#project").hidden &&
+      confirm(`Add the pasted image as page ${p.pages + 1} of “${p.name}”?\n\nCancel starts a new project instead.`)) {
+    return addPages(imgs);
+  }
+  return upload(imgs);
+}
+
+async function addPages(fileList) {
+  const files = [...(fileList || [])];
+  $("#add-pages").value = "";
+  if (!files.length || !state.current) return;
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  toast(`Adding ${files.length} page${files.length > 1 ? "s" : ""}…`);
+  try {
+    render(await api(`/api/projects/${encodeURIComponent(state.current)}/pages`, { method: "POST", body: fd }));
+    toast("Pages added. Find the parts again before converting.");
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---------------------------------------------------------------- startup
@@ -946,7 +1028,9 @@ async function init() {
   $("#save").onclick = save;
   $("#reset").onclick = reset;
   $("#convert").onclick = convert;
-  $("#upload").onchange = (e) => upload(e.target.files);
+  for (const id of ["#upload", "#pick-photos", "#pick-camera"]) $(id).onchange = (e) => upload(e.target.files);
+  $("#add-pages").onchange = (e) => addPages(e.target.files);
+  document.addEventListener("paste", onPaste);
   $("#suggest").onclick = suggest;
   $("#url-form").onsubmit = async (e) => {
     e.preventDefault();

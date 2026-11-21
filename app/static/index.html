@@ -21,14 +21,19 @@
 
   <div class="layout">
     <aside class="sidebar">
-      <label id="drop" class="drop">
-        <input id="upload" type="file" multiple hidden
-          accept=".flp,.html,.htm,.json,.pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.tif,.tiff,.bmp,.musicxml,.mxl,.xml,.mid,.midi,image/*">
-        <strong>Upload</strong>
-        <span>photos or PDF of sheet music or tab (pick several photos for several pages) · MusicXML · MIDI · FL Studio .flp · saved Songsterr page</span>
-      </label>
+      <div id="drop" class="drop">
+        <strong>Add music</strong>
+        <div class="pickers">
+          <label class="pick"><input id="pick-camera" type="file" accept="image/*" capture="environment" hidden>📷<span>Camera</span></label>
+          <label class="pick"><input id="pick-photos" type="file" accept="image/*" multiple hidden>🖼️<span>Photos</span></label>
+          <label class="pick"><input id="upload" type="file" multiple hidden
+            accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.tif,.tiff,.bmp,.musicxml,.mxl,.xml,.mid,.midi,.flp,.html,.htm,.json">📁<span>Files</span></label>
+        </div>
+        <span>photos or PDFs of sheet music or tab (several photos = several pages), MusicXML, MIDI, FL Studio,
+          Songsterr pages. Drop files here or paste an image anywhere.</span>
+      </div>
       <form id="url-form" class="url-form">
-        <input id="url-input" type="url" placeholder="…or paste a link (PDF, image, MusicXML, MIDI, Songsterr tab)"
+        <input id="url-input" type="url" placeholder="paste a link or an image"
           autocomplete="off" inputmode="url">
         <button type="submit" class="secondary">Add</button>
       </form>
@@ -115,7 +120,10 @@
 
         <div id="job" class="card job" hidden>
           <div class="job-head"><span id="job-spin" class="spinner"></span><b id="job-title"></b>
-            <span id="job-pct" class="muted"></span></div>
+            <span id="job-pct" class="muted"></span>
+            <button type="button" id="job-cancel" class="ghost" hidden>Cancel</button></div>
+          <p class="muted small job-note">Runs on the server: you can close this page or switch pieces, and it carries
+            on (even through a restart). The list on the left shows its progress.</p>
           <div class="bar"><div id="job-bar"></div></div>
           <pre id="job-log" class="job-log"></pre>
         </div>
@@ -140,6 +148,7 @@
             <div class="card-head">
               <h2>Parts</h2>
               <div class="actions wrap">
+                <label class="button ghost"><input id="add-pages" type="file" accept="image/*,.pdf" multiple hidden>+ Add pages</label>
                 <button id="detect-ai" class="secondary">✨ Find parts with AI</button>
                 <button id="detect-ocr" class="ghost">Find parts with OCR</button>
               </div>
