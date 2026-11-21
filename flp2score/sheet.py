@@ -54,6 +54,9 @@ def process_tab(src_dir: Path, work: Path, out_dir: Path, stem: str, formats: li
     with Claude) -> MuseScore for the other formats."""
     from tabmaker import gpsong, songsterr_song, tabread
 
+    from . import ai
+
+    ai_cfg = ai.for_task(ai_cfg, "tab")
     page_files = render_pages(src_dir, work)
     log(f"Sending {len(page_files)} page(s) to {ai_cfg.get('model')} to read the tab (this can take a few minutes)…")
     progress(0.1)
@@ -88,8 +91,9 @@ def detect_plan(src_dir: Path, work: Path, title: str, ai_cfg: dict | None, log:
     page_files = render_pages(src_dir, work)
     log(f"{len(page_files)} page(s)")
     if ai.configured(ai_cfg):
-        log(f"Reading the pages with {ai_cfg['model']}…")
-        plan = assist.plan_pages(ai_cfg, page_files, title, log)
+        cfg = ai.for_task(ai_cfg, "parts")
+        log(f"Reading the pages with {cfg['model']}…")
+        plan = assist.plan_pages(cfg, page_files, title, log)
     else:
         log("No AI endpoint set up: reading page headers with OCR…")
         plan = split.detect(page_files, title, log=lambda m: log(m.strip()))

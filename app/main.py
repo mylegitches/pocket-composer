@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from flp2score import ai, arrange, assist, catalogue, export, flp, mapping, preview, sheet
+from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, preview, sheet
 from flp2score.convert import FORMATS, convert, export_file
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,7 +50,7 @@ TAB_EXTS = {".html", ".htm", ".json"}
 UPLOAD_EXTS = {".flp"} | SCAN_EXTS | SCORE_EXTS | TAB_EXTS
 META_FILES = {"parts.json", "mode.json", "mapping.json", "tracks.json"}  # our own files in a project folder
 
-app = FastAPI(title="flp2score")
+app = FastAPI(title="Pocket Composer")
 _convert_lock = threading.Lock()  # one MuseScore conversion at a time
 _preview_lock = threading.Lock()  # one instrument sample render at a time
 _job_lock = threading.Lock()  # one background job (OMR / AI) at a time
@@ -342,6 +342,8 @@ def _ai_public() -> dict:
     a["has_key"] = bool(key)
     a["key_hint"] = ("…" + key[-4:]) if len(key) > 8 else ("saved" if key else "")
     a["configured"] = ai.configured(_ai_cfg())
+    a.setdefault("models", {})
+    a["task_models"] = {t: ai.for_task(_ai_cfg(), t)["model"] for t in ai.TASKS}
     return a
 
 
@@ -353,6 +355,7 @@ class AIIn(BaseModel):
     api_key: str | None = None  # None = keep the saved key
     clear_key: bool = False
     use_for_parts: bool = True
+    models: dict[str, str] = {}  # per-task model overrides ("" = main model)
 
 
 class SettingsIn(BaseModel):
@@ -363,7 +366,7 @@ class SettingsIn(BaseModel):
 @app.get("/api/settings")
 def get_settings() -> dict:
     s = _settings()
-    return {"favorites": s["favorites"], "ai": _ai_public(), "ai_presets": ai.PRESETS}
+    return {"favorites": s["favorites"], "ai": _ai_public(), "ai_presets": ai.PRESETS, "ai_tasks": ai.TASKS}
 
 
 @app.put("/api/settings")
@@ -382,7 +385,8 @@ def _merge_ai(cur: dict, new: AIIn) -> dict:
     if new.provider and new.provider not in ai.PROVIDERS:
         raise HTTPException(400, f"unknown provider {new.provider!r}")
     cur.update(preset=new.preset, provider=new.provider, base_url=new.base_url.strip().rstrip("/"),
-               model=new.model.strip(), use_for_parts=new.use_for_parts)
+               model=new.model.strip(), use_for_parts=new.use_for_parts,
+               models={t: (new.models.get(t) or "").strip() for t in ai.TASKS})
     if new.clear_key:
         cur.pop("api_key", None)
     elif new.api_key:
@@ -400,6 +404,24 @@ def ai_test(body: AIIn) -> dict:
     except ai.AIError as e:
         raise HTTPException(502, str(e)) from e
     return {"ok": True, "reply": reply.strip()[:200], "seconds": round(time.time() - t0, 1)}
+
+
+class AITaskTestIn(AIIn):
+    task: str
+
+
+@app.post("/api/ai/test_task")
+def ai_test_task(body: AITaskTestIn) -> dict:
+    """Run one job on a sample page with a known answer, with the settings in the form, and score it."""
+    if body.task not in ai.TASKS:
+        raise HTTPException(400, "unknown task")
+    cfg = _merge_ai(dict(_ai_cfg()), body)
+    if not ai.configured(cfg):
+        raise HTTPException(400, "Fill in the service, model and API key first.")
+    try:
+        return aitest.run(cfg, body.task, OUTPUT_DIR / "_aitest")
+    except ai.AIError as e:
+        raise HTTPException(502, str(e)) from e
 
 
 @app.post("/api/ai/models")
@@ -475,7 +497,8 @@ async def upload_project(files: list[UploadFile] = File(...)) -> dict:
         raise HTTPException(400, "no file")
     exts = [Path(f.filename).suffix.lower() for f in files]
     if any(e not in UPLOAD_EXTS for e in exts):
-        raise HTTPException(400, "upload an FL Studio .flp, a PDF or photos of sheet music, MusicXML or MIDI")
+        raise HTTPException(400, "upload a PDF or photos of sheet music or tab, MusicXML, MIDI, an FL Studio .flp, "
+                                 "or a saved Songsterr page")
     if len(files) > 1 and not all(e in SCAN_EXTS for e in exts):
         raise HTTPException(400, "only PDFs and photos can be uploaded several at a time (as the pages of one piece)")
     stem = _safe_name(Path(files[0].filename).stem)
@@ -487,8 +510,15 @@ async def upload_project(files: list[UploadFile] = File(...)) -> dict:
         fname = f"{stem}{ext}" if len(files) == 1 else f"{i:03d}{ext}"  # numbered: pages stay in picked order
         with (d / fname).open("wb") as fh:
             shutil.copyfileobj(f.file, fh)
+    return _check_new_project(d, stem, files[0].filename)
+
+
+def _check_new_project(d: Path, stem: str, label: str) -> dict:
+    """Make sure a freshly saved input is usable; remove it again if not."""
     kind, srcs = _sources(d)
     try:
+        if not kind:
+            raise ValueError("not a file type this app reads")
         if kind == "flp":
             flp.read(srcs[0])
         elif kind == "tab":
@@ -500,8 +530,113 @@ async def upload_project(files: list[UploadFile] = File(...)) -> dict:
             sheet.render_pages(d, work)
     except Exception as e:
         shutil.rmtree(d, ignore_errors=True)
-        raise HTTPException(400, f"couldn't use {files[0].filename}: {e}") from e
+        raise HTTPException(400, f"couldn't use {label}: {e}") from e
     return _summary(stem)
+
+
+# --- import from a link
+
+URL_MAX_BYTES = 80 * 1024 * 1024
+CONTENT_EXTS = {
+    "application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
+    "image/heic": ".heic", "image/tiff": ".tif", "audio/midi": ".mid", "audio/x-midi": ".mid",
+    "application/vnd.recordare.musicxml": ".mxl", "application/vnd.recordare.musicxml+xml": ".musicxml",
+    "text/html": ".html", "application/json": ".json", "application/xml": ".xml", "text/xml": ".xml",
+}
+
+
+def _public_host(url: str) -> None:
+    """Refuse links to this machine or the local network (the server fetches them, not the browser)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise HTTPException(400, "paste an http(s) link")
+    try:
+        addrs = {a[4][0] for a in socket.getaddrinfo(u.hostname, None)}
+    except socket.gaierror as e:
+        raise HTTPException(400, f"can't find {u.hostname}") from e
+    for a in addrs:
+        ip = ipaddress.ip_address(a.split("%")[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise HTTPException(400, "links to this computer or your local network aren't fetched")
+
+
+class UrlIn(BaseModel):
+    url: str
+
+
+@app.post("/api/projects/from_url")
+def project_from_url(body: UrlIn) -> dict:
+    """Make a project from a link: a PDF / image / MusicXML / MIDI / .flp file, or a Songsterr tab page.
+
+    A MuseScore.com score page is answered with its MusicXML download link (MuseScore needs you logged in)."""
+    import httpx
+    from urllib.parse import unquote, urlparse
+
+    url = body.url.strip()
+    _public_host(url)
+    headers = {"User-Agent": "Mozilla/5.0 (pocket-composer)"}
+    try:
+        with httpx.Client(headers=headers, timeout=60, follow_redirects=True, max_redirects=5) as client:
+            with client.stream("GET", url) as r:
+                _public_host(str(r.url))  # where the redirects ended up
+                if r.status_code != 200:
+                    raise HTTPException(400, f"the link answered {r.status_code}")
+                data = bytearray()
+                for chunk in r.iter_bytes():
+                    data += chunk
+                    if len(data) > URL_MAX_BYTES:
+                        raise HTTPException(400, "that file is over 80 MB")
+                ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                disp = r.headers.get("content-disposition", "")
+                final = str(r.url)
+    except httpx.HTTPError as e:
+        raise HTTPException(400, f"couldn't download the link: {e}") from e
+
+    name = ""
+    if "filename=" in disp:
+        name = disp.split("filename=")[-1].strip('"; ')
+    name = name or unquote(Path(urlparse(final).path).name) or "download"
+    ext = Path(name).suffix.lower()
+    if ext not in UPLOAD_EXTS:
+        ext = CONTENT_EXTS.get(ctype, "")
+    if data[:4] == b"%PDF":
+        ext = ".pdf"
+    elif data[:4] == b"FLhd":
+        ext = ".flp"
+    elif data[:4] == b"MThd":
+        ext = ".mid"
+    if ext not in UPLOAD_EXTS:
+        raise HTTPException(400, f"that link isn't a music file this app reads ({ctype or 'unknown type'})")
+    stem = Path(name).stem if Path(name).suffix else name
+    if ext in (".html", ".htm"):
+        text = data.decode("utf-8", errors="replace")
+        if "songsterr" in final.lower() and '<script id="state"' in text:
+            from tabmaker import songsterr
+
+            try:
+                meta = songsterr.parse_page(text)
+                stem = " - ".join(x for x in (meta.get("artist"), meta.get("title")) if x) or stem
+            except Exception:  # fall through to the normal check, which explains what's wrong
+                pass
+        elif "musescore.com" in final.lower():
+            from tabmaker import musescore_page
+
+            info = musescore_page.parse_page(text)
+            raise HTTPException(400, info["message"] + (f" Download link: {info['mxlUrl']}" if info.get("mxlUrl") else ""))
+        else:
+            raise HTTPException(400, "that page isn't a music file. Links work for PDFs, images, MusicXML, MIDI, "
+                                     ".flp files and Songsterr tab pages.")
+    stem = _safe_name(stem)[:80]
+    d = DATA_DIR / stem
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    (d / f"{stem}{ext}").write_bytes(bytes(data))
+    return _check_new_project(d, stem, name)
 
 
 @app.get("/api/projects/{name}")
@@ -545,7 +680,8 @@ def suggest(name: str) -> dict:
     if s["kind"] != "flp":
         raise HTTPException(400, "instrument suggestions are for FL Studio projects")
     try:
-        return {"channels": assist.suggest_mapping(_ai_cfg(), s["channels"], _settings()["favorites"])}
+        return {"channels": assist.suggest_mapping(ai.for_task(_ai_cfg(), "suggest"), s["channels"],
+                                                   _settings()["favorites"])}
     except ai.AIError as e:
         raise HTTPException(502, str(e)) from e
 

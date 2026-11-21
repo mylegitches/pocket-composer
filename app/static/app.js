@@ -580,8 +580,9 @@ function aiForm() {
   const preset = state.presets.find((x) => x.id === $("#ai-preset").value) || {};
   return {
     preset: preset.id || "", provider: preset.provider || "", base_url: $("#ai-url").value.trim(),
-    model: $("#ai-model").value.trim(), api_key: $("#ai-key").value || null,
+    model: $("#ai-model").value.split(" · ")[0].trim(), api_key: $("#ai-key").value || null,
     use_for_parts: $("#ai-parts").checked,
+    models: Object.fromEntries([...document.querySelectorAll("#ai-tasks .task-model")].map((i) => [i.dataset.task, i.value.split(" · ")[0].trim()])),
   };
 }
 
@@ -605,6 +606,7 @@ function renderAiSettings() {
   $("#ai-model").value = a.model || "";
   $("#ai-key").value = "";
   $("#ai-parts").checked = a.use_for_parts !== false;
+  renderTaskRows(a.models || {});
   syncKeyField();
   const st = $("#ai-status");
   st.className = "small " + (a.configured ? "ok" : "muted");
@@ -651,6 +653,45 @@ async function aiTest() {
   }
 }
 
+function renderTaskRows(models) {
+  const box = $("#ai-tasks");
+  box.innerHTML = "";
+  for (const [task, label] of Object.entries(state.aiTasks || {})) {
+    const row = document.createElement("div");
+    row.className = "task-row";
+    const [what, need] = label.split(" — ");
+    row.innerHTML = `<div class="task-label"><b></b><small class="muted"></small></div>
+      <input class="task-model" list="ai-models" autocomplete="off">
+      <button type="button" class="ghost task-test">Test</button>
+      <div class="task-result small"></div>`;
+    row.querySelector("b").textContent = what;
+    row.querySelector("small").textContent = need || "";
+    const input = row.querySelector("input");
+    input.dataset.task = task;
+    input.value = models[task] || "";
+    input.placeholder = "same as main model";
+    row.querySelector("button").onclick = () => testTask(task, row);
+    box.append(row);
+  }
+}
+
+async function testTask(task, row) {
+  const out = row.querySelector(".task-result");
+  const btn = row.querySelector("button");
+  const model = row.querySelector("input").value.trim() || $("#ai-model").value.trim();
+  btn.disabled = true;
+  out.className = "task-result small muted";
+  out.innerHTML = `<span class="spinner"></span>Testing ${model}… (a tab can take a few minutes)`;
+  try {
+    const r = await api("/api/ai/test_task", { method: "POST", body: JSON.stringify({ ...aiForm(), task }) });
+    out.className = "task-result small " + (r.score >= 90 ? "ok" : r.score >= 60 ? "warn" : "bad");
+    out.textContent = `${r.model}: ${r.score}% in ${r.seconds}s — ${r.summary}`;
+  } catch (e) {
+    out.className = "task-result small bad";
+    out.textContent = `${model}: ✗ ${e.message}`;
+  } finally { btn.disabled = false; }
+}
+
 async function aiListModels() {
   const btn = $("#ai-list");
   btn.disabled = true;
@@ -658,7 +699,7 @@ async function aiListModels() {
     const r = await api("/api/ai/models", { method: "POST", body: JSON.stringify(aiForm()) });
     const dl = $("#ai-models");
     dl.innerHTML = "";
-    for (const m of r.models) dl.append(new Option(m, m));
+    for (const m of r.models) dl.append(new Option(m, m.split(" · ")[0]));
     toast(`${r.models.length} models found: tap the Model box to pick one`);
     $("#ai-model").focus();
   } catch (e) { toast(e.message, true); }
@@ -907,6 +948,22 @@ async function init() {
   $("#convert").onclick = convert;
   $("#upload").onchange = (e) => upload(e.target.files);
   $("#suggest").onclick = suggest;
+  $("#url-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const url = $("#url-input").value.trim();
+    if (!url) return;
+    const btn = $("#url-form button");
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>`;
+    try {
+      const p = await api("/api/projects/from_url", { method: "POST", body: JSON.stringify({ url }) });
+      $("#url-input").value = "";
+      await loadProjects();
+      const h = "#" + encodeURIComponent(p.name);
+      if (location.hash === h) openProject(p.name); else location.hash = h;
+    } catch (err) { toast(err.message, true); }
+    finally { btn.disabled = false; btn.textContent = "Add"; }
+  };
   $("#delete").onclick = deleteProject;
   $("#detect-ai").onclick = () => detectParts(true);
   $("#detect-ocr").onclick = () => detectParts(false);
@@ -951,6 +1008,7 @@ async function init() {
   state.favorites = new Set(settings.favorites);
   state.ai = settings.ai;
   state.presets = settings.ai_presets;
+  state.aiTasks = settings.ai_tasks;
   state.byId = Object.fromEntries(state.instruments.map((i) => [i.id, i]));
   await loadProjects();
   const fromHash = () => {

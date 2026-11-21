@@ -3,12 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>flp2score</title>
+  <title>Pocket Composer</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon-180.png">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <meta name="theme-color" content="#e0632a">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="logo">♪</span> flp2score <span class="sub">FL Studio · sheet music → MuseScore</span></div>
+    <div class="brand"><img class="logo" src="/static/icon.svg" alt="" width="28" height="28"> Pocket Composer <span class="sub">any music → MuseScore</span></div>
     <div class="top-right">
       <div id="health" class="health"></div>
       <a id="open-settings" class="top-link" href="#:settings">⚙ Settings</a>
@@ -21,22 +25,28 @@
         <input id="upload" type="file" multiple hidden
           accept=".flp,.html,.htm,.json,.pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.tif,.tiff,.bmp,.musicxml,.mxl,.xml,.mid,.midi,image/*">
         <strong>Upload</strong>
-        <span>FL Studio .flp · PDF or photos of sheet music or tab (pick several photos for several pages) · MusicXML · MIDI · saved Songsterr page</span>
+        <span>photos or PDF of sheet music or tab (pick several photos for several pages) · MusicXML · MIDI · FL Studio .flp · saved Songsterr page</span>
       </label>
+      <form id="url-form" class="url-form">
+        <input id="url-input" type="url" placeholder="…or paste a link (PDF, image, MusicXML, MIDI, Songsterr tab)"
+          autocomplete="off" inputmode="url">
+        <button type="submit" class="secondary">Add</button>
+      </form>
       <h2>Projects</h2>
       <ul id="projects" class="projects"></ul>
     </aside>
 
     <main id="main">
       <section id="empty" class="empty">
-        <h1>Pick or upload a project</h1>
-        <p><b>FL Studio projects:</b> each channel with piano-roll notes becomes a part. Choose a MuseScore
-          instrument for each one, then convert.</p>
-        <p><b>PDFs and photos of sheet music:</b> the parts are found (by your AI endpoint, or OCR), the notes are
-          read by a recognition model, and MuseScore writes the score and one file per part.</p>
-        <p><b>Guitar and bass tab:</b> photos of a tab are read by your AI endpoint; a saved Songsterr tab page
-          (Ctrl+S, “HTML only”) downloads its tracks. Both become Guitar Pro and then a score.</p>
-        <p><b>MusicXML and MIDI</b> go straight through MuseScore. Tick <b>.gp5</b> to also get a Guitar Pro file.</p>
+        <h1>Turn any music into a MuseScore score</h1>
+        <p>Upload or drop a file, or paste a link, on the left.</p>
+        <p><b>Photos and PDFs of sheet music:</b> the parts are found (by your AI model, or OCR), the notes are read
+          by a recognition model, and MuseScore writes the score and one file per part.</p>
+        <p><b>Guitar and bass tab:</b> photos are read by your AI model; a Songsterr link downloads the tracks.
+          Both become Guitar Pro and a score.</p>
+        <p><b>MusicXML and MIDI</b> go straight through MuseScore.</p>
+        <p><b>FL Studio projects:</b> each channel with notes becomes a part; pick a MuseScore instrument for each.</p>
+        <p class="muted small">Out: .mscz, PDF, audio with a follow-along highlight, MusicXML, MIDI and Guitar Pro.</p>
       </section>
 
       <section id="settings" hidden>
@@ -54,13 +64,17 @@
           <div class="form-grid">
             <label>Service <select id="ai-preset"></select></label>
             <label>Endpoint URL <input id="ai-url" placeholder="https://…" autocomplete="off"></label>
-            <label>Model
+            <label>Main model
               <span class="row"><input id="ai-model" list="ai-models" autocomplete="off" placeholder="pick or type a model">
                 <button id="ai-list" type="button" class="ghost">List models</button></span>
               <datalist id="ai-models"></datalist>
             </label>
             <label>API key <input id="ai-key" type="password" autocomplete="new-password"></label>
           </div>
+          <h3 class="sub-h">Model for each job <span class="muted small">(leave empty to use the main model)</span></h3>
+          <div id="ai-tasks" class="ai-tasks"></div>
+          <p class="muted small">Each <b>Test</b> sends a sample page with a known answer and scores the reply, so you
+            can compare models. Tests use the form as it is now; press Save to keep it.</p>
           <label class="check"><input type="checkbox" id="ai-parts" checked> Use AI to find the parts in PDFs and
             photos (otherwise OCR)</label>
           <p class="muted small">For sheet music, pick a model that can read images (a "vision" model). The key is

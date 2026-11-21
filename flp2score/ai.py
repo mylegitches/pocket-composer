@@ -26,7 +26,7 @@ TIMEOUT = httpx.Timeout(900.0, connect=15.0)  # a whole tab can take minutes
 # Presets shown in the settings page. Model is left to the user (or picked from "List models").
 PRESETS = [
     {"id": "ollama-cloud", "label": "Ollama Cloud", "provider": "ollama", "base_url": "https://ollama.com",
-     "key": True},
+     "key": True, "model": "kimi-k3.1-pro"},
     {"id": "ollama-local", "label": "Ollama on this PC", "provider": "ollama",
      "base_url": "http://host.docker.internal:11434", "key": False},
     {"id": "llama-api", "label": "Meta Llama API", "provider": "openai",
@@ -41,6 +41,12 @@ PRESETS = [
     {"id": "custom", "label": "Other OpenAI-compatible", "provider": "openai", "base_url": "", "key": True},
 ]
 PROVIDERS = {"ollama", "openai", "anthropic", "gemini"}
+# The jobs the AI does; each can use its own model (settings "models": {task: model}, "" = the main model).
+TASKS = {
+    "parts": "Reading sheet-music pages (title, instrument, clef, key) — needs vision",
+    "tab": "Reading guitar/bass tab photos into frets and rhythm — needs vision, long answers",
+    "suggest": "Suggesting MuseScore instruments for FL Studio channels — text only",
+}
 # Claude models that take the server-side refusal fallback (see _anthropic).
 _FALLBACK_MODELS = {"claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 
@@ -49,8 +55,20 @@ class AIError(Exception):
     pass
 
 
+def _local(url: str) -> bool:
+    return any(h in url for h in ("localhost", "127.0.0.1", "host.docker.internal", "[::1]"))
+
+
 def configured(cfg: dict | None) -> bool:
-    return bool(cfg and cfg.get("provider") in PROVIDERS and cfg.get("model") and cfg.get("base_url"))
+    """Ready to use: provider, URL and model set, and a key unless the endpoint is on this machine."""
+    return bool(cfg and cfg.get("provider") in PROVIDERS and cfg.get("model") and cfg.get("base_url")
+                and (cfg.get("api_key") or _local(cfg["base_url"])))
+
+
+def for_task(cfg: dict, task: str) -> dict:
+    """The config with the model chosen for this task (falls back to the main model)."""
+    model = (cfg.get("models") or {}).get(task) or cfg.get("model", "")
+    return {**cfg, "model": model}
 
 
 def _b64(data: bytes) -> str:
@@ -84,7 +102,7 @@ def _ollama(cfg, system, prompt, images, want_json, max_tokens):
     msg = {"role": "user", "content": prompt}
     if images:
         msg["images"] = [_b64(i) for i in images]
-    body = {"model": cfg["model"], "stream": False, "options": {"temperature": 0, "num_predict": -1},
+    body = {"model": cfg["model"], "stream": False, "options": {"temperature": 0, "num_predict": max_tokens},
             "messages": [{"role": "system", "content": system}, msg]}
     if want_json:
         body["format"] = "json"
@@ -161,6 +179,8 @@ _CALL = {"ollama": _ollama, "openai": _openai, "anthropic": _anthropic, "gemini"
 def ask(cfg: dict, system: str, prompt: str, images: list[bytes] | None = None, want_json: bool = False,
         max_tokens: int = 16000) -> str:
     if not configured(cfg):
+        if cfg and cfg.get("model") and not cfg.get("api_key"):
+            raise AIError("The AI endpoint has no API key saved. Add it on the Settings page.")
         raise AIError("No AI endpoint is set up. Add one on the Settings page.")
     try:
         return _CALL[cfg["provider"]](cfg, system, prompt, images or [], want_json, max_tokens)
@@ -198,7 +218,11 @@ def list_models(cfg: dict) -> list[str]:
     try:
         if p == "ollama":
             d = _check(httpx.get(base + "/api/tags", headers=_bearer(cfg), timeout=30), "Ollama")
-            return sorted(m.get("name") or m.get("model") for m in d.get("models", []))
+            # Ollama lists what each model can do; a model that can't chat ("completion") is no use here.
+            return sorted(f"{name} · vision" if "vision" in caps else name
+                          for m in d.get("models", [])
+                          if (name := m.get("name") or m.get("model"))
+                          and "completion" in (caps := m.get("capabilities") or ["completion"]))
         if p == "openai":
             d = _check(httpx.get(base + "/models", headers=_bearer(cfg), timeout=30), "The AI endpoint")
             return sorted(m["id"] for m in d.get("data", []))
