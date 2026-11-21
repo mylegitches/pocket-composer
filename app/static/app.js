@@ -892,13 +892,125 @@ function renderOutputs(p, result) {
 
 // ---------------------------------------------------------------- Play screen
 //
-// The score follows the audio, laid out as pages (top to bottom) or as one continuous strip that scrolls
-// sideways. MuseScore's .spos says where each note column is and when it plays; .mpos gives each system's
-// box, which is how the strip is cut out of the pages. The instrument names light up while each one sounds.
+// The score follows the audio, laid out as one continuous strip (MuseScore's own one-line layout of the
+// whole piece) or as pages. On the strip, the start of the line (instrument names, clefs, key and time
+// signatures) stays pinned on the left, and each instrument's name lights up while it sounds.
+// The badges above are a mixer: click to mute or unmute an instrument, right-click to solo it, All to reset.
+// Every instrument has its own audio (rendered by MuseScore), played in sync with Web Audio.
 
-const play = { name: null, data: null, raf: 0, sys: [], cursor: null, last: null, userScroll: 0, lights: [] };
+const play = { name: null, data: null, raf: 0, sys: [], cursor: null, last: null, userScroll: 0,
+  lights: [], badges: [], off: new Set(), strip: null };
 const LAYOUT_KEY = "pocketcomposer.layout";
 const STRIP_GAP = 10;
+
+// ---- the mixer: one AudioBuffer per instrument (or the full mix while those aren't ready)
+
+const mixer = {
+  ctx: null, buffers: [], gains: [], sources: [], startAt: 0, offset: 0, playing: false, duration: 0,
+  stems: false, loadId: 0, ready: false,
+
+  async load(urls, stems) {
+    const id = ++this.loadId;
+    this.stop();
+    this.ready = false;
+    this.offset = 0;
+    this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const bufs = await Promise.all(urls.map(async (u) => {
+      const r = await fetch(u);
+      if (!r.ok) throw new Error(`couldn't load the audio (${r.status})`);
+      return this.ctx.decodeAudioData(await r.arrayBuffer());
+    }));
+    if (id !== this.loadId) return false;
+    this.buffers = bufs;
+    this.stems = stems;
+    this.duration = Math.max(...bufs.map((b) => b.duration));
+    this.gains = bufs.map(() => {
+      const g = this.ctx.createGain();
+      g.connect(this.ctx.destination);
+      return g;
+    });
+    this.ready = true;
+    this.applyMutes(true);
+    return true;
+  },
+  time() {
+    if (!this.playing) return this.offset;
+    return Math.min(this.duration, this.offset + this.ctx.currentTime - this.startAt);
+  },
+  play() {
+    if (!this.ready || this.playing) return;
+    this.ctx.resume();
+    if (this.offset >= this.duration - 0.05) this.offset = 0;
+    const at = this.ctx.currentTime + 0.05;
+    this.sources = this.buffers.map((b, i) => {
+      const s = this.ctx.createBufferSource();
+      s.buffer = b;
+      s.connect(this.gains[i]);
+      s.start(at, this.offset);
+      return s;
+    });
+    const longest = this.sources[this.buffers.findIndex((b) => b.duration === this.duration)];
+    longest.onended = () => { if (this.playing && this.time() >= this.duration - 0.1) this.ended(); };
+    this.startAt = at;
+    this.playing = true;
+    onTransport();
+  },
+  stop() {
+    for (const s of this.sources) { s.onended = null; try { s.stop(); } catch { /* not started */ } }
+    this.sources = [];
+  },
+  pause() {
+    if (!this.playing) return;
+    this.offset = this.time();
+    this.stop();
+    this.playing = false;
+    onTransport();
+  },
+  ended() {
+    this.stop();
+    this.playing = false;
+    this.offset = 0;
+    play.last = null;
+    onTransport();
+  },
+  seek(t) {
+    const was = this.playing;
+    if (was) { this.stop(); this.playing = false; }
+    this.offset = Math.max(0, Math.min(this.duration, t));
+    if (was) this.play(); else onTransport();
+  },
+  toggle() { this.playing ? this.pause() : this.play(); },
+  applyMutes(now = false) {
+    if (!this.ready) return;
+    this.gains.forEach((g, i) => {
+      const v = this.stems && play.off.has(i) ? 0 : 1;
+      if (now) g.gain.value = v; else g.gain.setTargetAtTime(v, this.ctx.currentTime, 0.015);
+    });
+  },
+};
+
+function fmtTime(t) {
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Play/pause button, time and the seek bar.
+function onTransport() {
+  const btn = $("#pp");
+  btn.textContent = mixer.playing ? "❚❚" : "▶";
+  btn.setAttribute("aria-label", mixer.playing ? "Pause" : "Play");
+  btn.disabled = !mixer.ready;
+  $("#seek").max = String(mixer.duration || 0);
+  updateClock();
+  cancelAnimationFrame(play.raf);
+  if (mixer.playing) { stopPreview(); followLoop(); } else drawCursor();
+}
+
+function updateClock() {
+  const t = mixer.time();
+  $("#clock").textContent = `${fmtTime(t)} / ${fmtTime(mixer.duration || 0)}`;
+  if (!play.seeking) $("#seek").value = String(t);
+}
 
 function getLayout() {
   try { return localStorage.getItem(LAYOUT_KEY) || "strip"; } catch { return "strip"; }
@@ -911,65 +1023,119 @@ function setLayout(v) {
 
 async function openPlay() {
   const name = state.current;
-  const audio = $("#score-audio");
   let d;
   try { d = await api(`/api/projects/${encodeURIComponent(name)}/playback`); } catch (e) { toast(e.message, true); return; }
   if (state.current !== name || state.view !== "play") return;
   $("#play-prep").hidden = d.ready;
   $("#play-ui").hidden = !d.ready;
+  const busy = d.job && (d.job.state === "queued" || d.job.state === "running");
   if (!d.ready) {
     play.data = null;
-    audio.pause();
-    const busy = d.job && (d.job.state === "queued" || d.job.state === "running");
+    mixer.pause();
     $("#play-prep-text").textContent = busy
       ? (d.job.state === "queued"
         ? "Getting it ready to play: waiting for the jobs ahead of it. It opens here by itself when it's done."
         : "Getting it ready to play: MuseScore is laying out the score. It opens here by itself when it's done.")
-      : d.can_prepare
-        ? "Getting it ready to play…"
-        : "There's nothing to play yet. Convert this piece on the Edit tab first.";
+      : d.can_prepare ? "Getting it ready to play…" : "There's nothing to play yet. Convert this piece on the Edit tab first.";
     $("#play-prep-go").hidden = true;
     $("#play-prep-edit").hidden = d.can_prepare;
     $("#play-prep-edit").href = hashFor(name, "edit");
     if (busy) showJob(d.job);
     return;
   }
+  // Ready, maybe with the one-line layout and per-instrument audio still being made in the background.
+  if (busy) showJob(d.job); else if (state.project?.job?.state !== "failed") $("#job").hidden = true;
+  const sameAudio = play.name === name && play.data?.audio === d.audio &&
+    JSON.stringify(play.data?.instruments?.map((i) => i.stem)) === JSON.stringify(d.instruments.map((i) => i.stem));
+  if (play.name !== name) play.off = new Set();
   play.name = name;
   play.data = d;
-  if (audio.getAttribute("src") !== d.audio) audio.src = d.audio;
-  renderLights();
+  renderBadges();
   renderScore();
+  if (!sameAudio) {
+    const stems = d.instruments.length && d.instruments.every((i) => i.stem);
+    $("#clock").textContent = stems ? "loading instruments…" : "loading…";
+    mixer.duration = 0;
+    onTransport();
+    try {
+      await mixer.load(stems ? d.instruments.map((i) => i.stem) : [d.audio], stems);
+    } catch (e) {
+      toast(e.message, true);
+      return;
+    }
+  }
+  onTransport();
+  $("#mixer-note").textContent = d.strip && d.instruments.every((i) => i.stem) ? ""
+    : busy ? "Muting instruments and the one-line strip are being made in the background; they switch on by themselves." : "";
 }
 
 function leavePlay() {
-  $("#score-audio")?.pause();
+  mixer.pause();
   cancelAnimationFrame(play.raf);
 }
 
 async function preparePlay() {
   try {
     showJob(await api(`/api/projects/${encodeURIComponent(state.current)}/playback`, { method: "POST" }));
-    $("#play-prep-go").hidden = true;
-    $("#play-prep-text").textContent = "Getting it ready to play. MuseScore is laying out the score; the progress is shown above.";
     loadProjects();
   } catch (e) { toast(e.message, true); }
 }
 
-// ---- instrument lights
+// ---- badges: a mixer, not a meter (the names on the staves light up instead)
 
-function renderLights() {
+function renderBadges() {
   const box = $("#lights");
   box.innerHTML = "";
-  play.lights = (play.data.instruments || []).map((ins) => {
-    const el = document.createElement("span");
-    el.className = "light";
-    el.innerHTML = `<span class="note" aria-hidden="true">♪</span><span></span>`;
-    el.lastChild.textContent = ins.name;
-    el.title = `${ins.name}: ${ins.notes} notes`;
-    box.append(el);
-    return { el, ins, on: false, hit: -1 };
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = "badge-all";
+  all.textContent = "All";
+  all.title = "Hear and show every instrument";
+  all.onclick = () => { play.off.clear(); applyFilter(); };
+  box.append(all);
+  play.badges = (play.data.instruments || []).map((ins, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mix";
+    b.innerHTML = `<span class="state" aria-hidden="true"></span><span></span>`;
+    b.lastChild.textContent = ins.name;
+    b.title = `${ins.name}: click to mute or unmute, right-click to hear only this one`;
+    const solo = () => {
+      play.off = new Set(play.data.instruments.map((_, k) => k).filter((k) => k !== i));
+      applyFilter();
+    };
+    let pressTimer = 0, longPressed = false;
+    b.onclick = () => {
+      if (longPressed) { longPressed = false; return; } // the long-press already soloed it
+      play.off.has(i) ? play.off.delete(i) : play.off.add(i);
+      applyFilter();
+    };
+    b.oncontextmenu = (e) => { e.preventDefault(); if (!longPressed) solo(); };
+    // Phones: a long press solos too (iPhones never send a right-click).
+    b.onpointerdown = (e) => {
+      if (e.pointerType !== "touch") return;
+      longPressed = false;
+      pressTimer = setTimeout(() => { longPressed = true; solo(); navigator.vibrate?.(15); }, 550);
+    };
+    b.onpointerup = b.onpointercancel = b.onpointerleave = () => clearTimeout(pressTimer);
+    box.append(b);
+    return { el: b, ins, on: false, hit: -1 };
   });
-  box.hidden = !play.lights.length;
+  box.hidden = !play.badges.length;
+  applyFilter();
+}
+
+function applyFilter() {
+  play.badges.forEach((b, i) => {
+    const off = play.off.has(i);
+    b.el.classList.toggle("off", off);
+    b.el.setAttribute("aria-pressed", String(!off));
+    b.el.querySelector(".state").textContent = off ? "🔇" : "🔊";
+  });
+  document.querySelectorAll(".mute-band").forEach((el) => { el.hidden = !play.off.has(Number(el.dataset.ins)); });
+  document.querySelectorAll(".name-light").forEach((el) => el.classList.toggle("muted", play.off.has(Number(el.dataset.ins))));
+  if (play.off.size && mixer.ready && !mixer.stems) toast("Muting needs each instrument's own audio, which is still being made. It works as soon as that's done.");
+  mixer.applyMutes();
 }
 
 // Index of the last item whose start (item[0], or the item itself) is at or before ms; -1 if none.
@@ -982,14 +1148,17 @@ function lastAtOrBefore(arr, ms, key = (x) => x) {
   return ans;
 }
 
+// Light up what's sounding: the instrument names on the strip, or the badges in the other layouts.
 function updateLights(ms, running) {
-  for (const L of play.lights) {
-    const i = lastAtOrBefore(L.ins.spans, ms, (s) => s[0]);
-    const on = i >= 0 && ms < L.ins.spans[i][1] && (running || ms > 0);
+  const names = play.lights.length ? play.lights : play.badges;
+  for (const L of names) {
+    const ins = L.ins;
+    const i = lastAtOrBefore(ins.spans, ms, (s) => s[0]);
+    const on = running || ms > 0 ? i >= 0 && ms < ins.spans[i][1] : false;
     if (on !== L.on) { L.on = on; L.el.classList.toggle("on", on); }
-    const h = lastAtOrBefore(L.ins.hits, ms);
+    const h = lastAtOrBefore(ins.hits, ms);
     if (h !== L.hit) {
-      const fresh = running && h >= 0 && ms - L.ins.hits[h] < 200;
+      const fresh = running && h >= 0 && ms - ins.hits[h] < 200;
       L.hit = h;
       if (fresh) { L.el.classList.remove("hit"); void L.el.offsetWidth; L.el.classList.add("hit"); }
     }
@@ -1010,9 +1179,14 @@ function renderScore() {
   box.innerHTML = "";
   play.sys = [];
   play.cursor = null;
+  play.strip = null;
   play.last = null;
-  if (layout === "strip" && d.systems?.length) buildStrip(box);
+  play.lights = [];
+  play.badges.forEach((b) => { b.on = false; b.el.classList.remove("on"); });
+  if (layout === "strip" && d.strip?.staves?.length) buildLine(box);
+  else if (layout === "strip" && d.systems?.length) buildStrip(box);
   else buildPages(box);
+  applyFilter();
   drawCursor();
 }
 
@@ -1030,19 +1204,125 @@ function buildPages(box) {
     page.onclick = (e) => {
       const tl = play.data.timeline;
       const r = page.getBoundingClientRect();
-      seekTo(i, (e.clientX - r.left) / r.width * tl.page_w, (e.clientY - r.top) / r.height * tl.page_h);
+      seekTo(tl, i, (e.clientX - r.left) / r.width * tl.page_w, (e.clientY - r.top) / r.height * tl.page_h);
     };
     box.append(page);
   });
 }
 
-// Cut each system out of its page and lay them side by side: one long line of music.
+// Which staves belong to which instrument: each staff goes to the name nearest to it (a piano's name sits
+// between its two staves). Returns, per instrument, the [top, bottom] of its band on the page.
+function instrumentBands(staves, names, count) {
+  const gap = (staves[0][1] - staves[0][0]) / 4 || 80;
+  const owner = staves.map(([a, b]) => {
+    const c = (a + b) / 2;
+    let best = 0, bestD = Infinity;
+    names.forEach((n, k) => { const d = Math.abs((n[1] + n[3]) / 2 - c); if (d < bestD) { bestD = d; best = k; } });
+    return best;
+  });
+  const bands = [];
+  for (let k = 0; k < count; k++) {
+    const mine = staves.filter((_, s) => owner[s] === k);
+    if (!mine.length) { bands.push(null); continue; }
+    bands.push([Math.min(...mine.map((s) => s[0])), Math.max(...mine.map((s) => s[1]))]);
+  }
+  // Grow each band halfway to its neighbours, so a fade also covers notes above and below the staff.
+  return bands.map((b, k) => {
+    if (!b) return null;
+    const prev = bands.slice(0, k).reverse().find(Boolean);
+    const next = bands.slice(k + 1).find(Boolean);
+    return [prev ? (prev[1] + b[0]) / 2 : b[0] - gap * 5, next ? (b[1] + next[0]) / 2 : b[1] + gap * 5];
+  });
+}
+
+// The whole piece as MuseScore laid it out on one line. The start of the line (names, clefs, key and time
+// signatures) is pinned on the left; the music scrolls past it.
+function buildLine(box) {
+  box.className = "strip";
+  const d = play.data, st = d.strip, tl = st.timeline;
+  const W = tl.page_w;
+  const sys = st.systems?.[0] || { x: 0, y: st.staves[0][0], w: W, h: st.staves.at(-1)[1] - st.staves[0][0] };
+  const gap = (st.staves[0][1] - st.staves[0][0]) / 4 || 80;
+  const firstX = Math.min(...tl.events.map((e) => e[2]));
+  const headX0 = Math.max(0, Math.min(sys.x, ...st.names.map((n) => n[0])) - gap * 2);
+  const headX1 = firstX - gap * 1.2;
+  const bodyX1 = sys.x + sys.w + gap;
+  const top = Math.max(0, Math.min(sys.y, ...st.names.map((n) => n[1])) - gap * 7);
+  const bottom = Math.max(sys.y + sys.h, st.staves.at(-1)[1]) + gap * 7;
+  const H = bottom - top;
+  const boxTop = box.getBoundingClientRect().top;
+  const avail = Math.max(180, Math.min(innerHeight * 0.78, innerHeight - boxTop - 48));
+  const scale = Math.min(avail / H, 1.6 * box.clientWidth / (bodyX1 - headX0));
+  const row = document.createElement("div");
+  row.className = "strip-row line";
+  row.style.height = `${H * scale}px`;
+
+  const slice = (cls, x0, x1) => {
+    const el = document.createElement("div");
+    el.className = cls;
+    el.style.width = `${(x1 - x0) * scale}px`;
+    el.style.height = `${H * scale}px`;
+    const img = document.createElement("img");
+    img.src = st.page;
+    img.alt = "";
+    img.draggable = false;
+    img.style.width = `${W * scale}px`;
+    img.style.left = `${-x0 * scale}px`;
+    img.style.top = `${-top * scale}px`;
+    el.append(img);
+    return el;
+  };
+  const head = slice("line-head", headX0, headX1);
+  const body = slice("line-body", headX1, bodyX1);
+  body.querySelector("img").alt = "score";
+
+  // Mute fades and name lights.
+  const bands = instrumentBands(st.staves, st.names, d.instruments.length);
+  const band = (parent, k, y0, y1) => {
+    const el = document.createElement("div");
+    el.className = "mute-band";
+    el.dataset.ins = k;
+    el.style.top = `${(y0 - top) * scale}px`;
+    el.style.height = `${(y1 - y0) * scale}px`;
+    el.hidden = true;
+    parent.append(el);
+  };
+  bands.forEach((b, k) => { if (b) { band(body, k, b[0], b[1]); band(head, k, b[0], b[1]); } });
+  play.lights = d.instruments.map((ins, k) => {
+    const n = st.names[k];
+    if (!n) return null;
+    const el = document.createElement("div");
+    el.className = "name-light";
+    el.dataset.ins = k;
+    const padX = gap * 0.8, padY = gap * 0.6;
+    el.style.left = `${(n[0] - padX - headX0) * scale}px`;
+    el.style.top = `${(n[1] - padY - top) * scale}px`;
+    el.style.width = `${(n[2] - n[0] + 2 * padX) * scale}px`;
+    el.style.height = `${(n[3] - n[1] + 2 * padY) * scale}px`;
+    head.append(el);
+    return { el, ins, on: false, hit: -1 };
+  }).filter(Boolean);
+
+  const cur = document.createElement("div");
+  cur.className = "cursor strip-cursor";
+  cur.hidden = true;
+  body.append(cur);
+  body.onclick = (e) => {
+    const r = body.getBoundingClientRect();
+    seekTo(tl, 0, headX1 + (e.clientX - r.left) / scale, top + (e.clientY - r.top) / scale);
+  };
+  row.append(head, body);
+  box.append(row);
+  play.cursor = cur;
+  play.strip = { tl, scale, x0: headX1, top, sys, headW: (headX1 - headX0) * scale };
+}
+
+// Fallback while the one-line layout is being made: cut each system out of the pages and lay them side by side.
 function buildStrip(box) {
   box.className = "strip";
   const d = play.data;
   const { page_w: W, page_h: H } = d.timeline;
   const sys = d.systems;
-  // Room above and below each system for ledger lines and markings, without reaching into its neighbours.
   const pads = sys.map((s, i) => {
     const prev = sys[i - 1]?.page === s.page ? sys[i - 1] : null;
     const next = sys[i + 1]?.page === s.page ? sys[i + 1] : null;
@@ -1055,38 +1335,13 @@ function buildStrip(box) {
   const above = Math.max(...pads.map((p) => p.top));
   const below = Math.max(...sys.map((s, i) => s.h + pads[i].bot));
   const stripH = above + below;
-  const top = box.getBoundingClientRect().top + scrollY;
-  const avail = Math.max(180, Math.min(innerHeight * 0.75, innerHeight - (top - scrollY) - 56));
+  const avail = Math.max(180, Math.min(innerHeight * 0.75, innerHeight - box.getBoundingClientRect().top - 56));
   const scale = Math.min(avail / stripH, 2.2 * box.clientWidth / W);
   const padX = W * 0.006;
   const row = document.createElement("div");
   row.className = "strip-row";
   row.style.height = `${stripH * scale}px`;
   let left = 0;
-  // Staff labels: the instrument names in front of the first line, pinned on the left while the strip scrolls.
-  const s0 = sys[0];
-  const labelX = W * 0.05;
-  if (s0.x - labelX > W * 0.04) {
-    const lw = (s0.x - labelX) * scale;
-    const lab = document.createElement("div");
-    lab.className = "sys labels";
-    lab.style.width = `${lw}px`;
-    const clip = document.createElement("div");
-    clip.className = "clip";
-    clip.style.top = `${(above - pads[0].top) * scale}px`;
-    clip.style.height = `${(s0.h + pads[0].top + pads[0].bot) * scale}px`;
-    const img = document.createElement("img");
-    img.src = d.pages[s0.page];
-    img.alt = "";
-    img.draggable = false;
-    img.style.width = `${W * scale}px`;
-    img.style.left = `${-labelX * scale}px`;
-    img.style.top = `${-(s0.y - pads[0].top) * scale}px`;
-    clip.append(img);
-    lab.append(clip);
-    row.append(lab);
-    left += lw + STRIP_GAP;
-  }
   sys.forEach((s, i) => {
     const w = (s.w + 2 * padX) * scale;
     const el = document.createElement("div");
@@ -1108,7 +1363,7 @@ function buildStrip(box) {
     const info = { ...s, left, x0: s.x - padX, scale, above };
     el.onclick = (e) => {
       const r = el.getBoundingClientRect();
-      seekTo(s.page, info.x0 + (e.clientX - r.left) / scale, s.y - above + (e.clientY - r.top) / scale);
+      seekTo(d.timeline, s.page, info.x0 + (e.clientX - r.left) / scale, s.y - above + (e.clientY - r.top) / scale);
     };
     play.sys.push(info);
     row.append(el);
@@ -1122,8 +1377,8 @@ function buildStrip(box) {
   box.append(row);
 }
 
-function cursorAt(ms) {
-  const ev = play.data?.timeline?.events;
+function cursorAt(tl, ms) {
+  const ev = tl?.events;
   if (!ev?.length || ms < ev[0][0]) return null;
   const lo = lastAtOrBefore(ev, ms, (e) => e[0]);
   const [t, page, x, y, w, h] = ev[lo];
@@ -1147,16 +1402,29 @@ function systemFor(pos) {
 }
 
 function drawCursor() {
-  const audio = $("#score-audio");
   if (!play.data || $("#play-view").hidden) return;
-  const ms = audio.currentTime * 1000;
-  const running = !audio.paused;
+  updateClock();
+  const ms = mixer.time() * 1000;
+  const running = mixer.playing;
   updateLights(ms, running);
-  const idle = audio.paused && audio.currentTime === 0;
-  const pos = idle ? null : cursorAt(ms);
+  const idle = !running && mixer.time() === 0;
   const box = $("#play-score");
   const follow = running && Date.now() > play.userScroll;
-  if (play.cursor) { // strip
+  if (play.strip) { // the one-line layout
+    const S = play.strip;
+    const pos = idle ? null : cursorAt(S.tl, ms);
+    play.cursor.hidden = !pos;
+    if (!pos) return;
+    const x = (pos.x - S.x0) * S.scale;
+    play.cursor.style.left = `${x}px`;
+    play.cursor.style.top = `${(pos.y - S.top) * S.scale}px`;
+    play.cursor.style.height = `${pos.h * S.scale}px`;
+    // The music glides past a fixed reading point, just right of the pinned names and clefs.
+    if (follow) box.scrollLeft = x - (box.clientWidth - S.headW) * 0.3;
+    return;
+  }
+  const pos = idle ? null : cursorAt(play.data.timeline, ms);
+  if (play.cursor) { // stitched pages
     const s = pos && systemFor(pos);
     play.cursor.hidden = !s;
     if (!s) return;
@@ -1164,7 +1432,7 @@ function drawCursor() {
     play.cursor.style.left = `${x}px`;
     play.cursor.style.top = `${(s.above + pos.y - s.y) * s.scale}px`;
     play.cursor.style.height = `${pos.h * s.scale}px`;
-    if (follow) box.scrollLeft = x - box.clientWidth * 0.3; // the score glides past a fixed reading point
+    if (follow) box.scrollLeft = x - box.clientWidth * 0.3;
     return;
   }
   box.querySelectorAll(".cursor").forEach((c) => c.remove());
@@ -1178,7 +1446,6 @@ function drawCursor() {
   c.style.top = `${pos.y / H * 100}%`;
   c.style.height = `${pos.h / H * 100}%`;
   page.append(c);
-  // Scroll when the line moves to another system (or it's out of sight).
   const key = pos.page + ":" + pos.y;
   const r = c.getBoundingClientRect();
   const offscreen = r.bottom < 60 || r.top > innerHeight - 20;
@@ -1190,13 +1457,12 @@ function drawCursor() {
 
 function followLoop() {
   drawCursor();
-  if (!$("#score-audio").paused) play.raf = requestAnimationFrame(followLoop);
+  if (mixer.playing) play.raf = requestAnimationFrame(followLoop);
 }
 
-// Jump the audio to the note column nearest a point on a page.
-function seekTo(pageNo, px, py) {
-  const tl = play.data?.timeline;
-  if (!tl) return;
+// Jump to the note column nearest a point on a page of the given layout.
+function seekTo(tl, pageNo, px, py) {
+  if (!tl || !mixer.ready) return;
   let best = null, bestD = Infinity;
   for (const ev of tl.events) {
     if (ev[1] !== pageNo) continue;
@@ -1205,12 +1471,10 @@ function seekTo(pageNo, px, py) {
     if (d < bestD) { bestD = d; best = ev; }
   }
   if (!best) return;
-  const audio = $("#score-audio");
-  audio.currentTime = best[0] / 1000;
   play.last = null;
   play.userScroll = 0;
-  if (audio.paused) audio.play().catch(() => {});
-  drawCursor();
+  mixer.seek(best[0] / 1000);
+  if (!mixer.playing) mixer.play();
 }
 
 // ---------------------------------------------------------------- actions
@@ -1467,16 +1731,15 @@ async function init() {
   drop.ondragleave = () => drop.classList.remove("over");
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files); };
 
-  api("/api/health").then((h) => {
+  api("/api/health").then((h) => { // only worth saying when something's wrong
     const el = $("#health");
-    el.textContent = h.musescore ? "MuseScore ready" : "MuseScore not found";
+    el.textContent = h.musescore ? "" : "⚠ MuseScore not found";
     el.classList.toggle("bad", !h.musescore);
   });
-  const scoreAudio = $("#score-audio");
-  scoreAudio.addEventListener("play", () => { stopPreview(); cancelAnimationFrame(play.raf); followLoop(); });
-  scoreAudio.addEventListener("seeked", drawCursor);
-  scoreAudio.addEventListener("pause", drawCursor);
-  scoreAudio.addEventListener("ended", () => { play.last = null; scoreAudio.currentTime = 0; drawCursor(); });
+  $("#pp").onclick = () => mixer.toggle();
+  const seek = $("#seek");
+  seek.oninput = () => { play.seeking = true; $("#clock").textContent = `${fmtTime(Number(seek.value))} / ${fmtTime(mixer.duration)}`; };
+  seek.onchange = () => { play.seeking = false; play.last = null; play.userScroll = 0; mixer.seek(Number(seek.value)); };
   $("#lay-strip").onclick = () => setLayout("strip");
   $("#lay-pages").onclick = () => setLayout("pages");
   $("#play-prep-go").onclick = preparePlay;
@@ -1494,9 +1757,9 @@ async function init() {
     if (e.code !== "Space" || $("#play-view").hidden || $("#play-ui").hidden) return;
     if (e.target.closest("input, textarea, select, button, audio, [contenteditable]")) return;
     e.preventDefault();
-    scoreAudio.paused ? scoreAudio.play().catch(() => {}) : scoreAudio.pause();
+    mixer.toggle();
   });
-  player.addEventListener("play", () => scoreAudio.pause());
+  player.addEventListener("play", () => mixer.pause());
   $("#picker-close").onclick = () => $("#picker").close();
   $("#picker").addEventListener("close", stopPreview);
   $("#picker").addEventListener("click", (e) => { if (e.target.id === "picker") e.target.close(); }); // backdrop

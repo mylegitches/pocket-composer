@@ -23,14 +23,16 @@ def find_musescore() -> str | None:
     return None
 
 
-def convert(src: Path, outs: list[Path]) -> list[Path]:
+def convert(src: Path, outs: list[Path], style: Path | None = None) -> list[Path]:
+    """Export src to each of outs. style: a .mss file whose settings override the score's (page size...)."""
     exe = find_musescore()
     if not exe:
         raise SystemExit("MuseScore not found. Install MuseScore 4 or set the MUSESCORE env var.")
     made = []
+    pre = ["-S", str(style)] if style else []
     for out in outs:
         out.unlink(missing_ok=True)
-        subprocess.run([exe, "-o", str(out), str(src)], check=False,
+        subprocess.run([exe, *pre, "-o", str(out), str(src)], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
         if out.exists():
             made.append(out)

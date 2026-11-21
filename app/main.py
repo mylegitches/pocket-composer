@@ -14,6 +14,7 @@ Scan projects can also be read as guitar/bass tab (by the AI endpoint) instead o
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -388,6 +389,11 @@ def _load_jobs() -> None:
     _backfill_playback()
 
 
+def _base_play_ready(out: Path, stem: str) -> bool:
+    have = [out / f"{stem}.mp3", out / f"{stem}.spos", playback.mpos(out, stem), playback.play_mid(out, stem)]
+    return all(p.is_file() for p in have) and any(out.glob(f"{stem}-*.svg"))
+
+
 def _needs_playback(name: str) -> bool:
     """Converted, but missing what the Play tab needs (pieces converted before it existed)."""
     try:
@@ -396,8 +402,7 @@ def _needs_playback(name: str) -> bool:
         return False
     if _play_source(out, stem) is None:
         return False
-    have = [out / f"{stem}.mp3", out / f"{stem}.spos", playback.mpos(out, stem), playback.play_mid(out, stem)]
-    return not (all(p.is_file() for p in have) and any(out.glob(f"{stem}-*.svg")))
+    return not (_base_play_ready(out, stem) and playback.strip_ready(out))
 
 
 def _backfill_playback() -> None:
@@ -943,23 +948,39 @@ def get_playback(name: str) -> dict:
     mpos_f, mid = playback.mpos(out, stem), playback.play_mid(out, stem)
     pages = sorted(out.glob(f"{stem}-*.svg"), key=lambda p: int(p.stem.rsplit("-", 1)[1])) if out.is_dir() else []
     ready = mp3.is_file() and spos.is_file() and mpos_f.is_file() and mid.is_file() and bool(pages)
+    can = _play_source(out, stem) is not None
+    job = _active_job(name)
+    if can and not job and _needs_playback(name):  # get it ready (or finish the extras) without being asked
+        job = _queue_job(name, "playback", {})
     if not ready:
-        can = _play_source(out, stem) is not None
-        job = _active_job(name)
-        if can and not job:  # get it ready now, without being asked
-            job = _queue_job(name, "playback", {})
         return {"ready": False, "can_prepare": can, "job": job}
-    key = (name, mp3.stat().st_mtime, mpos_f.stat().st_mtime, mid.stat().st_mtime)
+    sd = playback.strip_dir(out)
+    strip_ok = playback.strip_ready(out)
+    key = (name, mp3.stat().st_mtime, mpos_f.stat().st_mtime, mid.stat().st_mtime,
+           (sd / "stems.json").stat().st_mtime if strip_ok else 0)
     if key not in _play_cache:
         try:
-            data = {"systems": playback.systems(mpos_f), "instruments": playback.instruments(mid)}
+            data = {"systems": playback.systems(mpos_f), "instruments": playback.instruments(mid), "strip": None}
+            if strip_ok:
+                tl = playback.timeline(sd / "strip.spos", sd / "strip-1.svg")
+                lay = playback.svg_layout(sd / "strip-1.svg")
+                rows = playback.systems(sd / "strip.mpos") if (sd / "strip.mpos").is_file() else []
+                stems = json.loads((sd / "stems.json").read_text(encoding="utf-8"))
+                if tl and len(stems) == len(data["instruments"]):
+                    for ins, st in zip(data["instruments"], stems):
+                        if st.get("file") and (sd / st["file"]).is_file():
+                            f = sd / st["file"]
+                            ins["stem"] = f"/api/projects/{name}/files/{playback.PLAY_DIR}/{f.name}?t={int(f.stat().st_mtime)}"
+                svg = sd / "strip-1.svg"
+                data["strip"] = {"page": f"/api/projects/{name}/files/{playback.PLAY_DIR}/strip-1.svg?t={int(svg.stat().st_mtime)}",
+                                 "timeline": tl, "systems": rows, **lay} if tl else None
         except (OSError, ValueError, ET.ParseError, IndexError) as e:
             raise HTTPException(500, f"couldn't read the playback data: {e}") from e
         _play_cache.clear()
         _play_cache[key] = data
     q = lambda p: f"/api/projects/{name}/files/{p.name}?t={int(p.stat().st_mtime)}"  # noqa: E731
     return {"ready": True, "audio": q(mp3), "pages": [q(p) for p in pages], "timeline": _timeline(name, stem),
-            **_play_cache[key]}
+            "job": job, **copy.deepcopy(_play_cache[key])}
 
 
 @app.post("/api/projects/{name}/playback")
@@ -1196,21 +1217,27 @@ def _run_job(j: dict, log, progress) -> dict | None:
         src = _play_source(out_dir, stem)
         if src is None:
             raise RuntimeError("convert this piece first")
-        log(f"MuseScore: laying out {src.name} for playback…")
-        progress(0.1)
-        # Pages, note and bar positions and the instrument MIDI all come from the same score, so they line up.
-        for old in out_dir.glob(f"{stem}-*.svg"):
-            old.unlink()
-        targets = [out_dir / f"{stem}.svg", out_dir / f"{stem}.spos", playback.mpos(out_dir, stem),
-                   playback.play_mid(out_dir, stem)]
-        if not (out_dir / f"{stem}.mp3").is_file():
-            targets.append(out_dir / f"{stem}.mp3")
-            log("No audio yet: MuseScore is rendering it too (this takes a while for long pieces).")
-        targets[3].parent.mkdir(parents=True, exist_ok=True)
-        export.convert(src, targets)
-        missing = [t.name for t in targets[1:] if not t.exists()]
-        if missing:
-            raise RuntimeError("MuseScore could not write: " + ", ".join(missing))
+        progress(0.05)
+        if not _base_play_ready(out_dir, stem):
+            log(f"MuseScore: laying out {src.name} for playback…")
+            # Pages, note and bar positions and the instrument MIDI all come from the same score, so they line up.
+            for old in out_dir.glob(f"{stem}-*.svg"):
+                old.unlink()
+            targets = [out_dir / f"{stem}.svg", out_dir / f"{stem}.spos", playback.mpos(out_dir, stem),
+                       playback.play_mid(out_dir, stem)]
+            if not (out_dir / f"{stem}.mp3").is_file():
+                targets.append(out_dir / f"{stem}.mp3")
+                log("No audio yet: MuseScore is rendering it too (this takes a while for long pieces).")
+            targets[3].parent.mkdir(parents=True, exist_ok=True)
+            export.convert(src, targets)
+            missing = [t.name for t in targets[1:] if not t.exists()]
+            if missing:
+                raise RuntimeError("MuseScore could not write: " + ", ".join(missing))
+        progress(0.2)
+        log("MuseScore: laying the whole piece out on one line…")
+        playback.make_strip(src, out_dir, stem)
+        progress(0.35)
+        playback.make_stems(src, out_dir, log)
         log("Ready to play.")
         return {"parts": [], "failed": []}
 
