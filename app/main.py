@@ -957,7 +957,8 @@ def get_playback(name: str) -> dict:
     sd = playback.strip_dir(out)
     strip_ok = playback.strip_ready(out)
     key = (name, mp3.stat().st_mtime, mpos_f.stat().st_mtime, mid.stat().st_mtime,
-           (sd / "stems.json").stat().st_mtime if strip_ok else 0)
+           (sd / "stems.json").stat().st_mtime if strip_ok else 0,
+           (sd / "strip.spos").stat().st_mtime if strip_ok else 0)
     if key not in _play_cache:
         try:
             data = {"systems": playback.systems(mpos_f), "instruments": playback.instruments(mid), "strip": None}
@@ -1237,10 +1238,12 @@ def _run_job(j: dict, log, progress) -> dict | None:
             if missing:
                 raise RuntimeError("MuseScore could not write: " + ", ".join(missing))
         progress(0.2)
-        log("MuseScore: laying the whole piece out on one line…")
-        playback.make_strip(src, out_dir, stem)
+        if not playback.strip_current(out_dir):
+            log("MuseScore: laying the whole piece out on one line…")
+            playback.make_strip(src, out_dir, stem)
         progress(0.35)
-        playback.make_stems(src, out_dir, log)
+        if not playback.stems_ready(out_dir):
+            playback.make_stems(src, out_dir, log)
         log("Ready to play.")
         return {"parts": [], "failed": []}
 

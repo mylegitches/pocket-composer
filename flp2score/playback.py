@@ -26,9 +26,20 @@ def strip_dir(out_dir: Path) -> Path:
     return out_dir / PLAY_DIR
 
 
-def strip_ready(out_dir: Path) -> bool:
+STRIP_VERSION = "strip.v2"  # bump to have every piece's strip laid out again in the background
+
+
+def strip_current(out_dir: Path) -> bool:
     d = strip_dir(out_dir)
-    return (d / "strip.spos").is_file() and (d / "strip-1.svg").is_file() and (d / "stems.json").is_file()
+    return (d / "strip.spos").is_file() and (d / "strip-1.svg").is_file() and (d / STRIP_VERSION).is_file()
+
+
+def stems_ready(out_dir: Path) -> bool:
+    return (strip_dir(out_dir) / "stems.json").is_file()
+
+
+def strip_ready(out_dir: Path) -> bool:
+    return strip_current(out_dir) and stems_ready(out_dir)
 
 
 # ---------------------------------------------------------------- the strip: the whole piece on one line
@@ -63,10 +74,22 @@ def make_strip(src: Path, out_dir: Path, stem: str) -> None:
     # Tall enough for the title and the whole line on page 1 (the title frame can take a few inches).
     height = max(14.0, max((s["h"] for s in rows), default=0) / UNITS_PER_INCH + 8)
     style = d / "strip.mss"
-    _write_style(style, min(3000.0, total * 1.5 + 6), height)
-    for old in d.glob("strip-*.svg"):
-        old.unlink()
-    export.convert(src, [d / "strip.svg", d / "strip.spos", d / "strip.mpos"], style=style)
+    width = min(3000.0, total * 1.5 + 6)
+    for _ in range(3):
+        _write_style(style, width, height)
+        for old in d.glob("strip-*.svg"):
+            old.unlink()
+        export.convert(src, [d / "strip.svg", d / "strip.spos", d / "strip.mpos"], style=style)
+        # The one-line system spaces its staves further apart than the normal layout did; if the last
+        # staff runs off the bottom of the page, MuseScore clips it. Grow the page until it fits.
+        line = systems(d / "strip.mpos")
+        page = d / f"strip-{(line[0]['page'] if line else 0) + 1}.svg"
+        staves = svg_layout(page)["staves"] if page.is_file() else []
+        bottom = max((s[1] for s in staves), default=0) / UNITS_PER_INCH
+        if bottom + 2 <= height:
+            break
+        height = bottom + 4
+    (d / STRIP_VERSION).write_text("ok", encoding="utf-8")
 
 
 def svg_layout(svg: Path) -> dict:
