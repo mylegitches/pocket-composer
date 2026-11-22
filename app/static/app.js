@@ -895,11 +895,11 @@ function renderOutputs(p, result) {
 // The score follows the audio, laid out as one continuous strip (MuseScore's own one-line layout of the
 // whole piece) or as pages. On the strip, the start of the line (instrument names, clefs, key and time
 // signatures) stays pinned on the left, and each instrument's name lights up while it sounds.
-// The badges above are a mixer: click to mute or unmute an instrument, right-click to solo it, All to reset.
+// The badges above are a mixer: each instrument can be muted and/or hidden; right-click solos, All resets.
 // Every instrument has its own audio (rendered by MuseScore), played in sync with Web Audio.
 
 const play = { name: null, data: null, raf: 0, sys: [], cursor: null, last: null, userScroll: 0,
-  lights: [], badges: [], off: new Set(), strip: null };
+  lights: [], badges: [], muted: new Set(), hidden: new Set(), strip: null };
 const LAYOUT_KEY = "pocketcomposer.layout";
 const STRIP_GAP = 10;
 
@@ -983,7 +983,7 @@ const mixer = {
   applyMutes(now = false) {
     if (!this.ready) return;
     this.gains.forEach((g, i) => {
-      const v = this.stems && play.off.has(i) ? 0 : 1;
+      const v = this.stems && play.muted.has(i) ? 0 : 1;
       if (now) g.gain.value = v; else g.gain.setTargetAtTime(v, this.ctx.currentTime, 0.015);
     });
   },
@@ -1047,7 +1047,7 @@ async function openPlay() {
   if (busy) showJob(d.job); else if (state.project?.job?.state !== "failed") $("#job").hidden = true;
   const sameAudio = play.name === name && play.data?.audio === d.audio &&
     JSON.stringify(play.data?.instruments?.map((i) => i.stem)) === JSON.stringify(d.instruments.map((i) => i.stem));
-  if (play.name !== name) play.off = new Set();
+  if (play.name !== name) { play.muted = new Set(); play.hidden = new Set(); }
   play.name = name;
   play.data = d;
   renderBadges();
@@ -1081,7 +1081,30 @@ async function preparePlay() {
   } catch (e) { toast(e.message, true); }
 }
 
-// ---- badges: a mixer, not a meter (the names on the staves light up instead)
+// ---- badges: a mixer with two switches per instrument, hear (mute) and see (hide), in any combination.
+// The names on the staves light up while they sound; badges light up only for instruments you've hidden.
+
+const ICON = {
+  ear: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/>' +
+    '<path class="on-only" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+    '<path class="off-only" d="M16 9l6 6M22 9l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<circle cx="12" cy="12" r="3" fill="currentColor"/>' +
+    '<path class="off-only" d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>',
+};
+
+// Click, plus right-click or a long press on phones (iPhones never send a right-click).
+function pressable(el, onClick, onSolo) {
+  let timer = 0, long = false;
+  el.onclick = (e) => { e.stopPropagation(); if (long) { long = false; return; } onClick(); };
+  el.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); if (!long) onSolo(); };
+  el.onpointerdown = (e) => {
+    if (e.pointerType !== "touch") return;
+    long = false;
+    timer = setTimeout(() => { long = true; onSolo(); navigator.vibrate?.(15); }, 550);
+  };
+  el.onpointerup = el.onpointercancel = el.onpointerleave = () => clearTimeout(timer);
+}
 
 function renderBadges() {
   const box = $("#lights");
@@ -1091,33 +1114,30 @@ function renderBadges() {
   all.className = "badge-all";
   all.textContent = "All";
   all.title = "Hear and show every instrument";
-  all.onclick = () => { play.off.clear(); applyFilter(); };
+  all.onclick = () => { play.muted.clear(); play.hidden.clear(); applyFilter(true); };
   box.append(all);
+  const n = (play.data.instruments || []).length;
+  const others = (i) => new Set([...Array(n).keys()].filter((k) => k !== i));
+  const flip = (set, i) => { set.has(i) ? set.delete(i) : set.add(i); };
   play.badges = (play.data.instruments || []).map((ins, i) => {
-    const b = document.createElement("button");
-    b.type = "button";
+    const b = document.createElement("div");
     b.className = "mix";
-    b.innerHTML = `<span class="state" aria-hidden="true"></span><span></span>`;
-    b.lastChild.textContent = ins.name;
-    b.title = `${ins.name}: click to mute or unmute, right-click to hear only this one`;
-    const solo = () => {
-      play.off = new Set(play.data.instruments.map((_, k) => k).filter((k) => k !== i));
-      applyFilter();
-    };
-    let pressTimer = 0, longPressed = false;
-    b.onclick = () => {
-      if (longPressed) { longPressed = false; return; } // the long-press already soloed it
-      play.off.has(i) ? play.off.delete(i) : play.off.add(i);
-      applyFilter();
-    };
-    b.oncontextmenu = (e) => { e.preventDefault(); if (!longPressed) solo(); };
-    // Phones: a long press solos too (iPhones never send a right-click).
-    b.onpointerdown = (e) => {
-      if (e.pointerType !== "touch") return;
-      longPressed = false;
-      pressTimer = setTimeout(() => { longPressed = true; solo(); navigator.vibrate?.(15); }, 550);
-    };
-    b.onpointerup = b.onpointercancel = b.onpointerleave = () => clearTimeout(pressTimer);
+    b.setAttribute("role", "group");
+    b.setAttribute("aria-label", ins.name);
+    b.innerHTML = `<button type="button" class="mix-btn ear">${ICON.ear}</button>` +
+      `<button type="button" class="mix-btn eye">${ICON.eye}</button><button type="button" class="mix-name"></button>`;
+    const [ear, eye, name] = b.querySelectorAll("button");
+    name.textContent = ins.name;
+    ear.title = `${ins.name}: click to mute or unmute, right-click to hear only this one`;
+    eye.title = `${ins.name}: click to hide or show its staff, right-click to show only this one`;
+    name.title = `${ins.name}: click to mute and hide (or bring back), right-click to hear and see only this one`;
+    pressable(ear, () => { flip(play.muted, i); applyFilter(); }, () => { play.muted = others(i); applyFilter(); });
+    pressable(eye, () => { flip(play.hidden, i); applyFilter(true); }, () => { play.hidden = others(i); applyFilter(true); });
+    pressable(name, () => {
+      const on = !play.muted.has(i) || !play.hidden.has(i);
+      for (const set of [play.muted, play.hidden]) on ? set.add(i) : set.delete(i);
+      applyFilter(true);
+    }, () => { play.muted = others(i); play.hidden = others(i); applyFilter(true); });
     box.append(b);
     return { el: b, ins, on: false, hit: -1 };
   });
@@ -1125,17 +1145,28 @@ function renderBadges() {
   applyFilter();
 }
 
-function applyFilter() {
+// Reflect mute/hide on the badges and in the audio; relayout the score when what's shown changed.
+function applyFilter(relayout = false) {
   play.badges.forEach((b, i) => {
-    const off = play.off.has(i);
-    b.el.classList.toggle("off", off);
-    b.el.setAttribute("aria-pressed", String(!off));
-    b.el.querySelector(".state").textContent = off ? "🔇" : "🔊";
+    const muted = play.muted.has(i), hidden = play.hidden.has(i);
+    b.el.classList.toggle("muted", muted);
+    b.el.classList.toggle("hidden", hidden);
+    b.el.classList.toggle("off", muted && hidden);
+    const [ear, eye] = b.el.querySelectorAll(".mix-btn");
+    ear.setAttribute("aria-label", muted ? "Unmute" : "Mute");
+    ear.setAttribute("aria-pressed", String(muted));
+    eye.setAttribute("aria-label", hidden ? "Show" : "Hide");
+    eye.setAttribute("aria-pressed", String(hidden));
   });
-  document.querySelectorAll(".mute-band").forEach((el) => { el.hidden = !play.off.has(Number(el.dataset.ins)); });
-  document.querySelectorAll(".name-light").forEach((el) => el.classList.toggle("muted", play.off.has(Number(el.dataset.ins))));
-  if (play.off.size && mixer.ready && !mixer.stems) toast("Muting needs each instrument's own audio, which is still being made. It works as soon as that's done.");
+  document.querySelectorAll(".name-light").forEach((el) => el.classList.toggle("muted", play.muted.has(Number(el.dataset.ins))));
+  if (play.muted.size && mixer.ready && !mixer.stems) toast("Muting needs each instrument's own audio, which is still being made. It works as soon as that's done.");
   mixer.applyMutes();
+  if (relayout) {
+    const box = $("#play-score");
+    const frac = box.scrollWidth > box.clientWidth ? box.scrollLeft / (box.scrollWidth - box.clientWidth) : 0;
+    renderScore();
+    box.scrollLeft = frac * (box.scrollWidth - box.clientWidth);
+  }
 }
 
 // Index of the last item whose start (item[0], or the item itself) is at or before ms; -1 if none.
@@ -1148,9 +1179,10 @@ function lastAtOrBefore(arr, ms, key = (x) => x) {
   return ans;
 }
 
-// Light up what's sounding: the instrument names on the strip, or the badges in the other layouts.
+// Light up what's sounding: the instrument names on the strip, and the badges of anything not shown there.
 function updateLights(ms, running) {
-  const names = play.lights.length ? play.lights : play.badges;
+  const lit = new Set(play.lights.map((L) => L.k));
+  const names = [...play.lights, ...play.badges.filter((_, i) => !lit.has(i))];
   for (const L of names) {
     const ins = L.ins;
     const i = lastAtOrBefore(ins.spans, ms, (s) => s[0]);
@@ -1182,7 +1214,7 @@ function renderScore() {
   play.strip = null;
   play.last = null;
   play.lights = [];
-  play.badges.forEach((b) => { b.on = false; b.el.classList.remove("on"); });
+  play.badges.forEach((b) => { b.on = false; b.hit = -1; b.el.classList.remove("on"); });
   if (layout === "strip" && d.strip?.staves?.length) buildLine(box);
   else if (layout === "strip" && d.systems?.length) buildStrip(box);
   else buildPages(box);
@@ -1192,6 +1224,12 @@ function renderScore() {
 
 function buildPages(box) {
   box.className = "pages seekable";
+  if (play.hidden.size) {
+    const p = document.createElement("p");
+    p.className = "muted small";
+    p.textContent = "Pages always show the full score; hidden instruments drop out on the one-line view. Their badges light up instead.";
+    box.append(p);
+  }
   play.data.pages.forEach((url, i) => {
     const page = document.createElement("div");
     page.className = "page";
@@ -1236,7 +1274,8 @@ function instrumentBands(staves, names, count) {
 }
 
 // The whole piece as MuseScore laid it out on one line. The start of the line (names, clefs, key and time
-// signatures) is pinned on the left; the music scrolls past it.
+// signatures) is pinned on the left; the music scrolls past it. Each instrument is its own horizontal band
+// of that line, so hidden instruments drop out and the rest close up and grow into the room.
 function buildLine(box) {
   box.className = "strip";
   const d = play.data, st = d.strip, tl = st.timeline;
@@ -1249,58 +1288,71 @@ function buildLine(box) {
   const bodyX1 = sys.x + sys.w + gap;
   const top = Math.max(0, Math.min(sys.y, ...st.names.map((n) => n[1])) - gap * 7);
   const bottom = Math.max(sys.y + sys.h, st.staves.at(-1)[1]) + gap * 7;
-  const H = bottom - top;
+
+  // Bands that tile the line from top to bottom, one per instrument; keep the ones not hidden.
+  const all = instrumentBands(st.staves, st.names, d.instruments.length);
+  const owned = all.map((b, k) => b && { k, y0: b[0], y1: b[1] }).filter(Boolean);
+  if (!owned.length) owned.push({ k: -1, y0: top, y1: bottom });
+  owned[0].y0 = Math.min(owned[0].y0, top);
+  owned.at(-1).y1 = Math.max(owned.at(-1).y1, bottom);
+  const shown = owned.filter((b) => !play.hidden.has(b.k));
+  if (!shown.length) {
+    box.innerHTML = `<p class="muted strip-empty">Every instrument is hidden. Tap an eye, or All, to bring them back.</p>`;
+    return;
+  }
+  let H = 0;
+  for (const b of shown) { b.at = H; H += b.y1 - b.y0; }
+
   const boxTop = box.getBoundingClientRect().top;
   const avail = Math.max(180, Math.min(innerHeight * 0.78, innerHeight - boxTop - 48));
-  const scale = Math.min(avail / H, 1.6 * box.clientWidth / (bodyX1 - headX0));
+  // Fit the height, but don't let a lone staff blow up past a comfortable size.
+  const scale = Math.min(avail / H, 1.6 * box.clientWidth / (bodyX1 - headX0), 15 / gap);
   const row = document.createElement("div");
   row.className = "strip-row line";
   row.style.height = `${H * scale}px`;
 
-  const slice = (cls, x0, x1) => {
+  const column = (cls, x0, x1) => {
     const el = document.createElement("div");
     el.className = cls;
     el.style.width = `${(x1 - x0) * scale}px`;
     el.style.height = `${H * scale}px`;
-    const img = document.createElement("img");
-    img.src = st.page;
-    img.alt = "";
-    img.draggable = false;
-    img.style.width = `${W * scale}px`;
-    img.style.left = `${-x0 * scale}px`;
-    img.style.top = `${-top * scale}px`;
-    el.append(img);
+    for (const b of shown) {
+      const clip = document.createElement("div");
+      clip.className = "band";
+      clip.style.top = `${b.at * scale}px`;
+      clip.style.height = `${(b.y1 - b.y0) * scale}px`;
+      const img = document.createElement("img");
+      img.src = st.page;
+      img.alt = "";
+      img.draggable = false;
+      img.style.width = `${W * scale}px`;
+      img.style.left = `${-x0 * scale}px`;
+      img.style.top = `${-b.y0 * scale}px`;
+      clip.append(img);
+      el.append(clip);
+    }
     return el;
   };
-  const head = slice("line-head", headX0, headX1);
-  const body = slice("line-body", headX1, bodyX1);
+  const head = column("line-head", headX0, headX1);
+  const body = column("line-body", headX1, bodyX1);
   body.querySelector("img").alt = "score";
+  row.classList.toggle("cut", shown.length < owned.length);
 
-  // Mute fades and name lights.
-  const bands = instrumentBands(st.staves, st.names, d.instruments.length);
-  const band = (parent, k, y0, y1) => {
-    const el = document.createElement("div");
-    el.className = "mute-band";
-    el.dataset.ins = k;
-    el.style.top = `${(y0 - top) * scale}px`;
-    el.style.height = `${(y1 - y0) * scale}px`;
-    el.hidden = true;
-    parent.append(el);
-  };
-  bands.forEach((b, k) => { if (b) { band(body, k, b[0], b[1]); band(head, k, b[0], b[1]); } });
+  // Name lights, on the names of the instruments still shown.
+  const bandOf = new Map(shown.map((b) => [b.k, b]));
   play.lights = d.instruments.map((ins, k) => {
-    const n = st.names[k];
-    if (!n) return null;
+    const n = st.names[k], b = bandOf.get(k);
+    if (!n || !b) return null;
     const el = document.createElement("div");
     el.className = "name-light";
     el.dataset.ins = k;
     const padX = gap * 0.8, padY = gap * 0.6;
     el.style.left = `${(n[0] - padX - headX0) * scale}px`;
-    el.style.top = `${(n[1] - padY - top) * scale}px`;
+    el.style.top = `${(n[1] - padY - b.y0 + b.at) * scale}px`;
     el.style.width = `${(n[2] - n[0] + 2 * padX) * scale}px`;
     el.style.height = `${(n[3] - n[1] + 2 * padY) * scale}px`;
     head.append(el);
-    return { el, ins, on: false, hit: -1 };
+    return { el, ins, on: false, hit: -1, k };
   }).filter(Boolean);
 
   const cur = document.createElement("div");
@@ -1309,12 +1361,12 @@ function buildLine(box) {
   body.append(cur);
   body.onclick = (e) => {
     const r = body.getBoundingClientRect();
-    seekTo(tl, sys.page ?? 0, headX1 + (e.clientX - r.left) / scale, top + (e.clientY - r.top) / scale);
+    seekTo(tl, sys.page ?? 0, headX1 + (e.clientX - r.left) / scale, sys.y + sys.h / 2);
   };
   row.append(head, body);
   box.append(row);
   play.cursor = cur;
-  play.strip = { tl, scale, x0: headX1, top, sys, headW: (headX1 - headX0) * scale };
+  play.strip = { tl, scale, x0: headX1, H, sys, headW: (headX1 - headX0) * scale };
 }
 
 // Fallback while the one-line layout is being made: cut each system out of the pages and lay them side by side.
@@ -1417,8 +1469,8 @@ function drawCursor() {
     if (!pos) return;
     const x = (pos.x - S.x0) * S.scale;
     play.cursor.style.left = `${x}px`;
-    play.cursor.style.top = `${(pos.y - S.top) * S.scale}px`;
-    play.cursor.style.height = `${pos.h * S.scale}px`;
+    play.cursor.style.top = "0px";
+    play.cursor.style.height = `${S.H * S.scale}px`;
     // The music glides past a fixed reading point, just right of the pinned names and clefs.
     if (follow) box.scrollLeft = x - (box.clientWidth - S.headW) * 0.3;
     return;
