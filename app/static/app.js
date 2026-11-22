@@ -1306,7 +1306,7 @@ function buildLine(box) {
   const boxTop = box.getBoundingClientRect().top;
   const avail = Math.max(180, Math.min(innerHeight * 0.78, innerHeight - boxTop - 48));
   // Fit the height, but don't let a lone staff blow up past a comfortable size.
-  const scale = Math.min(avail / H, 1.6 * box.clientWidth / (bodyX1 - headX0), 15 / gap);
+  const scale = Math.min(avail / H, 15 / gap);
   const row = document.createElement("div");
   row.className = "strip-row line";
   row.style.height = `${H * scale}px`;
