@@ -161,8 +161,14 @@ def make_parts(src: Path, out_dir: Path, title: str, log=print, progress=lambda 
         log(f"Part {i}/{len(parts)}: {name or label}…")
         root = ET.fromstring(data)
         _clear_breaks(root)
-        for t in root.iter("work-title"):
-            t.text = f"{title} - {name}" if name else title
+        heading = f"{title} - {name}" if name else title
+        for t in [*root.iter("work-title"), *root.iter("movement-title")]:
+            t.text = heading
+        for c in root.iter("credit"):  # the title MuseScore actually prints
+            if (c.findtext("credit-type") or "") == "title" or (c.findtext("credit-words") or "").strip() == title:
+                w = c.find("credit-words")
+                if w is not None:
+                    w.text = heading
         xml, mpos = work / f"{label}.musicxml", work / f"{label}.mpos"
         try:
             moved = _tidy_turns(root, xml, mpos, style)
