@@ -31,7 +31,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, parts, playback, preview, sheet
+from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, playback, preview, sheet
+from flp2score import parts as print_parts
 from flp2score.convert import FORMATS, convert, export_file
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,11 +120,11 @@ def _outputs(name: str, stem: str) -> list[dict]:
         for f in sorted((out / "parts").iterdir()):
             if f.is_file():
                 add(f, "parts/" + f.name, part=True)
-    pd = parts.print_dir(out)
+    pd = print_parts.print_dir(out)
     if pd.is_dir():  # printable parts (and their .zip)
         for f in sorted(pd.iterdir()):
             if f.is_file():
-                add(f, f"{parts.PRINT_DIR}/{f.name}", part="print")
+                add(f, f"{print_parts.PRINT_DIR}/{f.name}", part="print")
     page_no = lambda f: int(m.group(1)) if (m := re.search(r"-(\d+)\.svg$", f["file"])) else 0  # noqa: E731
     svgs = sorted((f for f in files if f["kind"] == "svg"), key=page_no)
     return [f for f in files if f["kind"] != "svg"] + svgs
@@ -1275,7 +1276,7 @@ def _run_job(j: dict, log, progress) -> dict | None:
         title = _summary(name).get("title") or stem
         log("MuseScore: cutting the score into parts…")
         progress(0.05)
-        made = parts.make_parts(src, out_dir, title, log, progress)
+        made = print_parts.make_parts(src, out_dir, title, log, progress)
         if not made:
             raise RuntimeError("MuseScore could not write any part")
         log(f"Done: {len(made)} printable part(s).")
