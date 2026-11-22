@@ -211,7 +211,7 @@ def split_staves(svg: Path, staves: list[list[float]], first_x: float) -> dict:
     ink = [[a, b] for a, b in staves]
     per: list[list[str]] = [[] for _ in range(n)]
     heads: list[list[str]] = [[] for _ in range(n)]
-    marks: list[str] = []
+    marks: list[tuple[float, str]] = []
     sys_ink = [float("inf"), float("-inf")]
     sig_x1, float_x0 = 0.0, float("inf")
     for (i, (x0, y0, x1, y1)), o in zip(body, owner):
@@ -219,7 +219,7 @@ def split_staves(svg: Path, staves: list[list[float]], first_x: float) -> dict:
         m = re.search(r'class="(\w*)"', line)
         cls = m.group(1) if m else ""
         if cls in SYSTEM_CLASSES:
-            marks.append(line)
+            marks.append((x0, line))
             sys_ink = [min(sys_ink[0], y0), max(sys_ink[1], y1)]
             if x0 < first_x:
                 float_x0 = min(float_x0, x0)
@@ -236,14 +236,20 @@ def split_staves(svg: Path, staves: list[list[float]], first_x: float) -> dict:
     for k in range(n):
         (svg.parent / f"{svg.stem}.s{k}.svg").write_text("\n".join(head + per[k] + tail), encoding="utf-8")
         (svg.parent / f"{svg.stem}.h{k}.svg").write_text("\n".join(head + heads[k] + tail), encoding="utf-8")
-    (svg.parent / f"{svg.stem}.sys.svg").write_text("\n".join(head + marks + tail), encoding="utf-8")
     cut = first_x - gap * 1.2
     if float_x0 < cut:
         cut = max(sig_x1 + gap * 0.4, float_x0 - gap * 0.3)
+    # A tempo mark at the very start can begin under the time signature; nudge it right of the pinned start.
+    early = [line for x0, line in marks if x0 < cut]
+    late = [line for x0, line in marks if x0 >= cut]
+    if early:
+        dx = cut - min(x0 for x0, _ in marks) + gap * 0.3
+        early = [f'<g transform="translate({dx:.1f},0)">', *early, "</g>"]
+    (svg.parent / f"{svg.stem}.sys.svg").write_text("\n".join(head + early + late + tail), encoding="utf-8")
     return {"ink": ink, "sys": sys_ink if marks else None, "cut": cut}
 
 
-BANDS_VERSION = 1
+BANDS_VERSION = 2
 
 
 def staff_layers(svg: Path, staves: list[list[float]], first_x: float) -> dict:
