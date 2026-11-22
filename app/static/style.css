@@ -538,7 +538,59 @@ a.button[hidden] { display: none; }
 .name-light.hit { animation: namehit 220ms ease-out; }
 @keyframes namehit { 0% { background: rgba(76, 194, 106, .9); } }
 .line-head .band, .line-body .band { position: absolute; left: 0; right: 0; overflow: hidden; }
-.strip-row.cut .band + .band { border-top: 1px dashed #c8ccd6; }
+.strip-row.cut .band + .band { border-top: 1px dashed #dde0e7; }
+.strip-row.cut .band.marks + .band { border-top: 0; }
 .name-light.muted { opacity: .35; }
 .strip-empty { padding: 24px 4px; }
 @media (prefers-reduced-motion: reduce) { .name-light.hit, .mix.hit { animation: none; } }
+
+/* ---- Play mode: the notes get the room; everything else shrinks to one slim bar */
+body.playing-view .topbar { padding-top: 4px; padding-bottom: 4px; }
+body.playing-view .brand .logo { width: 22px; height: 22px; }
+body.playing-view .top-link { padding-top: 4px; padding-bottom: 4px; font-size: 13px; }
+body.playing-view main { padding: 6px 14px 16px; }
+body.playing-view .project-head { margin-bottom: 4px; gap: 8px; }
+body.playing-view .page-title { font-size: 16px; }
+body.playing-view .back { font-size: 16px; padding: 0 6px; }
+body.playing-view .tabs { padding: 2px; border-radius: 8px; }
+body.playing-view .tab { padding: 3px 10px; font-size: 13px; }
+.play-bar { padding: 4px 0 6px; margin-bottom: 6px; }
+.play-row { gap: 6px; flex-wrap: nowrap; }
+.transport { min-width: 0; gap: 8px; padding: 2px 10px 2px 2px; }
+.pp { width: 28px; height: 28px; font-size: 11px; }
+.seg { padding: 2px; border-radius: 8px; flex: none; }
+.seg button { padding: 3px 8px; font-size: 12px; }
+.lights { gap: 4px; margin-top: 5px; }
+.badge-all { padding: 2px 9px; font-size: 12px; }
+.mix-btn { width: 22px; height: 22px; }
+.mix-btn:first-child { padding-left: 3px; }
+.mix-btn svg { width: 13px; height: 13px; }
+.mix-name { padding: 2px 9px 2px 3px; font-size: 12px; }
+.mixer-note { margin: 3px 0 0; font-size: 12px; }
+#play-score.strip { padding: 0 0 6px; }
+.play-help { position: relative; flex: none; }
+.play-help summary { list-style: none; cursor: pointer; width: 26px; height: 26px; border-radius: 50%; display: grid;
+  place-items: center; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font-weight: 700; font-size: 13px; }
+.play-help summary::-webkit-details-marker { display: none; }
+.play-help[open] summary { color: var(--text); border-color: var(--accent-h); }
+.play-help p { position: absolute; right: 0; top: 32px; z-index: 8; width: min(340px, 80vw); margin: 0; padding: 10px 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
+@media (max-width: 640px) {
+  .play-row { flex-wrap: wrap; }
+  .seg { width: auto; }
+  body.playing-view .tabs { width: auto; }
+}
+
+/* ---- Camera dialog (webcam on a computer) */
+.cam { width: min(760px, 94vw); background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 14px; padding: 14px; }
+.cam::backdrop { background: rgba(0, 0, 0, .6); }
+.cam-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.cam-head button { margin-left: auto; }
+.cam video { width: 100%; max-height: 60vh; background: #000; border-radius: 10px; display: block; }
+.cam video[hidden] { display: none; }
+.cam-shots { display: flex; gap: 8px; overflow-x: auto; margin: 10px 0; }
+.cam-shots:empty { display: none; }
+.cam-shots figure { position: relative; margin: 0; flex: none; }
+.cam-shots img { height: 72px; border-radius: 6px; display: block; }
+.cam-shots button { position: absolute; top: 2px; right: 2px; padding: 0 6px; font-size: 12px; background: rgba(0, 0, 0, .6); color: #fff; }

@@ -1313,23 +1313,27 @@ function buildPages(box) {
   });
 }
 
-// Which staves belong to which instrument: each staff goes to the name nearest to it (a piano's name sits
-// between its two staves). Returns, per instrument, the [top, bottom] of its band on the page.
-function instrumentBands(staves, names, count) {
-  const gap = (staves[0][1] - staves[0][0]) / 4 || 80;
-  const owner = staves.map(([a, b]) => {
+// Which instrument each staff belongs to: the name nearest to it (a piano's name sits between its two staves).
+function staffOwners(staves, names) {
+  return staves.map(([a, b]) => {
     const c = (a + b) / 2;
     let best = 0, bestD = Infinity;
     names.forEach((n, k) => { const d = Math.abs((n[1] + n[3]) / 2 - c); if (d < bestD) { bestD = d; best = k; } });
     return best;
   });
+}
+
+// Without per-staff layers: per instrument, the [top, bottom] of its band on the page, each band grown
+// halfway to its neighbours so the bands tile the page.
+function instrumentBands(staves, names, count) {
+  const gap = (staves[0][1] - staves[0][0]) / 4 || 80;
+  const owner = staffOwners(staves, names);
   const bands = [];
   for (let k = 0; k < count; k++) {
     const mine = staves.filter((_, s) => owner[s] === k);
     if (!mine.length) { bands.push(null); continue; }
     bands.push([Math.min(...mine.map((s) => s[0])), Math.max(...mine.map((s) => s[1]))]);
   }
-  // Grow each band halfway to its neighbours, so a fade also covers notes above and below the staff.
   return bands.map((b, k) => {
     if (!b) return null;
     const prev = bands.slice(0, k).reverse().find(Boolean);
@@ -1339,69 +1343,85 @@ function instrumentBands(staves, names, count) {
 }
 
 // The whole piece as MuseScore laid it out on one line. The start of the line (names, clefs, key and time
-// signatures) is pinned on the left; the music scrolls past it. Each instrument is its own horizontal band
-// of that line, so hidden instruments drop out and the rest close up and grow into the room.
+// signatures) is pinned on the left; the music scrolls past it. Each instrument is its own row, drawn from a
+// layer holding only that instrument's ink, so a note far below its staff is never cut off and never spills
+// into the next row. Hidden instruments drop out and the rest close up and grow into the room. Markings for
+// the whole line (tempo, rehearsal marks) get a slim row of their own on top.
 function buildLine(box) {
   box.className = "strip";
-  const d = play.data, st = d.strip, tl = st.timeline;
+  const d = play.data, st = d.strip, tl = st.timeline, L = st.layers;
   const W = tl.page_w;
   const sys = st.systems?.[0] || { x: 0, y: st.staves[0][0], w: W, h: st.staves.at(-1)[1] - st.staves[0][0] };
   const gap = (st.staves[0][1] - st.staves[0][0]) / 4 || 80;
   const firstX = Math.min(...tl.events.filter((e) => e[1] === (sys.page ?? e[1])).map((e) => e[2]));
   const headX0 = Math.max(0, Math.min(sys.x, ...st.names.map((n) => n[0])) - gap * 2);
-  const headX1 = firstX - gap * 1.2;
+  const headX1 = L?.cut ?? firstX - gap * 1.2;
   const bodyX1 = sys.x + sys.w + gap;
-  const top = Math.max(0, Math.min(sys.y, ...st.names.map((n) => n[1])) - gap * 7);
-  const bottom = Math.max(sys.y + sys.h, st.staves.at(-1)[1]) + gap * 7;
+  const pad = gap * 0.8;
 
-  // Bands that tile the line from top to bottom, one per instrument; keep the ones not hidden.
-  const all = instrumentBands(st.staves, st.names, d.instruments.length);
-  const owned = all.map((b, k) => b && { k, y0: b[0], y1: b[1] }).filter(Boolean);
-  if (!owned.length) owned.push({ k: -1, y0: top, y1: bottom });
-  owned[0].y0 = Math.min(owned[0].y0, top);
-  owned.at(-1).y1 = Math.max(owned.at(-1).y1, bottom);
-  const shown = owned.filter((b) => !play.hidden.has(b.k));
+  // Rows: {k, y0, y1, staff: [layer indexes]}; k = -1 is the markings row.
+  let rows;
+  if (L) {
+    const owner = staffOwners(st.staves, st.names);
+    rows = d.instruments.map((_, k) => {
+      const mine = owner.map((o, s) => (o === k ? s : -1)).filter((s) => s >= 0);
+      if (!mine.length) return null;
+      return { k, staff: mine, y0: Math.min(...mine.map((s) => L.ink[s][0])) - pad, y1: Math.max(...mine.map((s) => L.ink[s][1])) + pad };
+    }).filter(Boolean);
+  } else {
+    const top = Math.max(0, Math.min(sys.y, ...st.names.map((n) => n[1])) - gap * 7);
+    const bottom = Math.max(sys.y + sys.h, st.staves.at(-1)[1]) + gap * 7;
+    rows = instrumentBands(st.staves, st.names, d.instruments.length).map((b, k) => b && { k, y0: b[0], y1: b[1] }).filter(Boolean);
+    if (!rows.length) rows.push({ k: -1, y0: top, y1: bottom });
+    rows[0].y0 = Math.min(rows[0].y0, top);
+    rows.at(-1).y1 = Math.max(rows.at(-1).y1, bottom);
+  }
+  const shown = rows.filter((b) => !play.hidden.has(b.k));
   if (!shown.length) {
     box.innerHTML = `<p class="muted strip-empty">Every instrument is hidden. Tap an eye, or All, to bring them back.</p>`;
     return;
   }
+  if (L?.marks && L.sys) shown.unshift({ k: -2, marks: true, y0: L.sys[0] - gap * 0.4, y1: L.sys[1] + gap * 0.4 });
   let H = 0;
   for (const b of shown) { b.at = H; H += b.y1 - b.y0; }
 
   const boxTop = box.getBoundingClientRect().top;
-  const avail = Math.max(180, Math.min(innerHeight * 0.78, innerHeight - boxTop - 48));
+  const avail = Math.max(160, innerHeight - boxTop - 22);
   // Fit the height, but don't let a lone staff blow up past a comfortable size.
   const scale = Math.min(avail / H, 15 / gap);
   const row = document.createElement("div");
   row.className = "strip-row line";
   row.style.height = `${H * scale}px`;
 
-  const column = (cls, x0, x1) => {
+  const column = (cls, x0, x1, isHead) => {
     const el = document.createElement("div");
     el.className = cls;
     el.style.width = `${(x1 - x0) * scale}px`;
     el.style.height = `${H * scale}px`;
     for (const b of shown) {
       const clip = document.createElement("div");
-      clip.className = "band";
+      clip.className = b.marks ? "band marks" : "band";
       clip.style.top = `${b.at * scale}px`;
       clip.style.height = `${(b.y1 - b.y0) * scale}px`;
-      const img = document.createElement("img");
-      img.src = st.page;
-      img.alt = "";
-      img.draggable = false;
-      img.style.width = `${W * scale}px`;
-      img.style.left = `${-x0 * scale}px`;
-      img.style.top = `${-b.y0 * scale}px`;
-      clip.append(img);
+      const srcs = !L ? [st.page] : b.marks ? (isHead ? [] : [L.marks]) : b.staff.map((s) => (isHead ? L.head[s] : L.staff[s]));
+      for (const src of srcs) {
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = "";
+        img.draggable = false;
+        img.style.width = `${W * scale}px`;
+        img.style.left = `${-x0 * scale}px`;
+        img.style.top = `${-b.y0 * scale}px`;
+        clip.append(img);
+      }
       el.append(clip);
     }
     return el;
   };
-  const head = column("line-head", headX0, headX1);
-  const body = column("line-body", headX1, bodyX1);
-  body.querySelector("img").alt = "score";
-  row.classList.toggle("cut", shown.length < owned.length);
+  const head = column("line-head", headX0, headX1, true);
+  const body = column("line-body", headX1, bodyX1, false);
+  body.setAttribute("aria-label", "score");
+  row.classList.toggle("cut", true);
 
   // Name lights, on the names of the instruments still shown.
   const bandOf = new Map(shown.map((b) => [b.k, b]));
@@ -1797,6 +1817,105 @@ async function initStudio() {
 
 // ---------------------------------------------------------------- startup
 
+// ---- Camera: the phone's own camera app on a phone; the webcam, live, in a dialog on a computer.
+const cam = { stream: null, shots: [], facing: "environment" };
+
+function initCamera() {
+  $("#camera-btn").onclick = openCamera;
+  $("#cam-close").onclick = () => $("#cam").close();
+  $("#cam").addEventListener("close", stopCamera);
+  $("#cam-snap").onclick = snapPhoto;
+  $("#cam-flip").onclick = () => { cam.facing = cam.facing === "environment" ? "user" : "environment"; startCamera(); };
+  $("#cam-done").onclick = () => {
+    const files = cam.shots.map((s) => s.file);
+    $("#cam").close();
+    if (files.length) upload(files);
+  };
+}
+
+async function openCamera() {
+  const phone = matchMedia("(pointer: coarse)").matches && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+  if (phone) { $("#pick-camera").click(); return; }  // the phone's camera app does focus and flash better
+  cam.shots.forEach((s) => URL.revokeObjectURL(s.url));
+  cam.shots = [];
+  renderShots();
+  $("#cam").showModal();
+  await startCamera();
+}
+
+async function startCamera() {
+  stopCamera();
+  const msg = $("#cam-msg"), video = $("#cam-video");
+  msg.hidden = true;
+  video.hidden = false;
+  $("#cam-snap").disabled = true;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    video.hidden = true;
+    msg.hidden = false;
+    msg.innerHTML = window.isSecureContext
+      ? "This browser can't use a camera. Use 🖼️ Photos or 📁 Files instead."
+      : `The browser only lets a page use the webcam over https. Open <a href="https://pocketcomposer.mylegitches.com${location.hash}">the https address</a>, or use 🖼️ Photos or 📁 Files.`;
+    return;
+  }
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: cam.facing, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false });
+    video.srcObject = cam.stream;
+    $("#cam-snap").disabled = false;
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    $("#cam-flip").hidden = cams.length < 2;
+  } catch (e) {
+    video.hidden = true;
+    msg.hidden = false;
+    msg.textContent = e.name === "NotAllowedError"
+      ? "Camera access was blocked. Allow it in the address bar, then try again."
+      : e.name === "NotFoundError" ? "No camera found on this computer." : `Couldn't start the camera: ${e.message}`;
+  }
+}
+
+function stopCamera() {
+  cam.stream?.getTracks().forEach((t) => t.stop());
+  cam.stream = null;
+}
+
+function snapPhoto() {
+  const video = $("#cam-video");
+  if (!video.videoWidth) return;
+  const c = document.createElement("canvas");
+  c.width = video.videoWidth;
+  c.height = video.videoHeight;
+  c.getContext("2d").drawImage(video, 0, 0);
+  c.toBlob((blob) => {
+    if (!blob) return;
+    const n = cam.shots.length + 1;
+    const file = new File([blob], `camera-page-${n}.jpg`, { type: "image/jpeg" });
+    cam.shots.push({ file, url: URL.createObjectURL(blob) });
+    renderShots();
+  }, "image/jpeg", 0.92);
+}
+
+function renderShots() {
+  const box = $("#cam-shots");
+  box.innerHTML = "";
+  cam.shots.forEach((s, i) => {
+    const fig = document.createElement("figure");
+    const img = document.createElement("img");
+    img.src = s.url;
+    img.alt = `page ${i + 1}`;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ghost";
+    del.textContent = "✕";
+    del.setAttribute("aria-label", `Remove page ${i + 1}`);
+    del.onclick = () => { URL.revokeObjectURL(s.url); cam.shots.splice(i, 1); renderShots(); };
+    fig.append(img, del);
+    box.append(fig);
+  });
+  $("#cam-count").textContent = cam.shots.length ? `${cam.shots.length} page${cam.shots.length > 1 ? "s" : ""}` : "";
+  $("#cam-done").disabled = !cam.shots.length;
+  $("#cam-done").textContent = cam.shots.length > 1 ? `Use ${cam.shots.length} photos` : "Use photo";
+}
+
 async function init() {
   $("#save").onclick = save;
   $("#reset").onclick = reset;
@@ -1806,6 +1925,7 @@ async function init() {
   $("#save-nas").onclick = saveToNas;
   $("#make-parts").onclick = makeParts;
   for (const id of ["#upload", "#pick-photos", "#pick-camera"]) $(id).onchange = (e) => upload(e.target.files);
+  initCamera();
   $("#add-pages").onchange = (e) => addPages(e.target.files);
   document.addEventListener("paste", onPaste);
   initStudio();

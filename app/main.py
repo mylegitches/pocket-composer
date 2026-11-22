@@ -985,8 +985,20 @@ def get_playback(name: str) -> dict:
                         if st.get("file") and (sd / st["file"]).is_file():
                             f = sd / st["file"]
                             ins["stem"] = f"/api/projects/{name}/files/{playback.PLAY_DIR}/{f.name}?t={int(f.stat().st_mtime)}"
-                data["strip"] = {"page": f"/api/projects/{name}/files/{playback.PLAY_DIR}/{svg.name}?t={int(svg.stat().st_mtime)}",
-                                 "timeline": tl, "systems": rows, **lay} if tl else None
+                url = lambda f: f"/api/projects/{name}/files/{playback.PLAY_DIR}/{f}?t={int(svg.stat().st_mtime)}"  # noqa: E731
+                layers = None
+                if tl and lay["staves"]:
+                    page = rows[0]["page"] if rows else 0
+                    xs = [e[2] for e in tl["events"] if e[1] == page]
+                    try:
+                        lay_b = playback.staff_layers(svg, lay["staves"], min(xs) if xs else 0)
+                        layers = {"staff": [url(f"{svg.stem}.s{k}.svg") for k in range(len(lay["staves"]))],
+                                  "head": [url(f"{svg.stem}.h{k}.svg") for k in range(len(lay["staves"]))],
+                                  "marks": url(f"{svg.stem}.sys.svg") if lay_b["sys"] else None,
+                                  "ink": lay_b["ink"], "sys": lay_b["sys"], "cut": lay_b["cut"]}
+                    except (OSError, ValueError, IndexError):
+                        layers = None  # fall back to cutting the whole page into bands
+                data["strip"] = {"page": url(svg.name), "timeline": tl, "systems": rows, "layers": layers, **lay} if tl else None
         except (OSError, ValueError, ET.ParseError, IndexError) as e:
             raise HTTPException(500, f"couldn't read the playback data: {e}") from e
         _play_cache.clear()
