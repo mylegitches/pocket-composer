@@ -1878,6 +1878,34 @@ async function initStudio() {
 
 // ---------------------------------------------------------------- startup
 
+// ---- Photos / Files on a computer: open the system picker in Pictures / Documents.
+// Only the File System Access picker can choose its starting folder (Chrome and Edge,
+// over https). Elsewhere, and on phones, the plain file input opens as before.
+function initFolderPickers() {
+  const phone = matchMedia("(pointer: coarse)").matches && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+  if (phone || !window.showOpenFilePicker) return;
+  const exts = (sel) => $(sel).accept.split(",").map((s) => s.trim()).filter((s) => s.startsWith("."));
+  const images = [".png", ".jpg", ".jpeg", ".heic", ".heif", ".webp", ".tif", ".tiff", ".bmp", ".gif"];
+  const pickers = [
+    ["#photos-btn", "#pick-photos", "pictures", [{ description: "Photos", accept: { "image/*": images } }]],
+    ["#files-btn", "#upload", "documents", [{ description: "Scores, pictures and projects",
+      accept: { "application/octet-stream": exts("#upload") } }]],
+  ];
+  for (const [btn, input, startIn, types] of pickers) {
+    $(btn).addEventListener("click", async (e) => {
+      if (e.target === $(input)) return;  // the fallback click below
+      e.preventDefault();
+      try {
+        const handles = await showOpenFilePicker({ startIn, multiple: true, types });
+        const files = await Promise.all(handles.map((h) => h.getFile()));
+        if (files.length) upload(files);
+      } catch (err) {
+        if (err.name !== "AbortError") $(input).click();  // picker refused: use the plain one
+      }
+    });
+  }
+}
+
 // ---- Camera: the phone's own camera app on a phone; the webcam, live, in a dialog on a computer.
 const cam = { stream: null, shots: [], facing: "environment" };
 
@@ -1987,6 +2015,7 @@ async function init() {
   $("#make-parts").onclick = makeParts;
   for (const id of ["#upload", "#pick-photos", "#pick-camera"]) $(id).onchange = (e) => upload(e.target.files);
   initCamera();
+  initFolderPickers();
   $("#add-pages").onchange = (e) => addPages(e.target.files);
   document.addEventListener("paste", onPaste);
   initStudio();
