@@ -15,6 +15,7 @@ Scan projects can also be read as guitar/bass tab (by the AI endpoint) instead o
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -27,7 +28,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1388,7 +1389,15 @@ def get_file(name: str, filename: str):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    """The page, with each UI file's address carrying its version. A proxy in front (the https address)
+    may tell browsers to keep /static files for a day; a new address after every update gets around that."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for asset in ("style.css", "app.js"):
+        f = STATIC / asset
+        if f.is_file():
+            v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]
+            html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={v}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
