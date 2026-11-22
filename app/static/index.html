@@ -298,6 +298,7 @@
                   <button type="button" id="lay-strip" title="One continuous line that scrolls sideways">⟷ Strip</button>
                   <button type="button" id="lay-pages" title="Pages, top to bottom">▤ Pages</button>
                 </div>
+                <button type="button" id="fs-btn" class="fs-btn" title="Full screen (F)" aria-label="Full screen">⛶</button>
                 <details class="play-help">
                   <summary aria-label="How to use Play" title="How to use Play">?</summary>
                   <p class="small">Tap the score to jump there; Space plays and pauses. Names light up while each instrument
@@ -309,6 +310,11 @@
               <p id="mixer-note" class="muted small mixer-note"></p>
             </div>
             <div id="play-score"></div>
+            <div class="fs-controls" role="group" aria-label="Full screen controls">
+              <button type="button" id="fs-pp" class="pp" aria-label="Play">▶</button>
+              <span id="fs-clock" class="clock"></span>
+              <button type="button" id="fs-exit" class="fs-exit" title="Exit full screen (Esc)" aria-label="Exit full screen">✕</button>
+            </div>
           </div>
         </div>
       </section>

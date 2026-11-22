@@ -594,3 +594,23 @@ body.playing-view .tab { padding: 3px 10px; font-size: 13px; }
 .cam-shots figure { position: relative; margin: 0; flex: none; }
 .cam-shots img { height: 72px; border-radius: 6px; display: block; }
 .cam-shots button { position: absolute; top: 2px; right: 2px; padding: 0 6px; font-size: 12px; background: rgba(0, 0, 0, .6); color: #fff; }
+
+/* ---- Play: full screen, only the music */
+.fs-btn { width: 28px; height: 28px; padding: 0; flex: none; border-radius: 8px; font-size: 15px; line-height: 1;
+  background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
+.fs-btn:hover { color: var(--text); }
+.fs-controls { display: none; }
+#play-ui.fs { position: fixed; inset: 0; z-index: 1000; background: #fff; overflow: auto; padding: 0; margin: 0; }
+#play-ui.fs .play-bar { display: none; }
+#play-ui.fs #play-score.strip { padding: 0; height: 100%; display: flex; align-items: center; }
+#play-ui.fs #play-score.pages { padding: 8px 0 40px; background: #fff; }
+#play-ui.fs .line-head, #play-ui.fs .line-body { border-radius: 0; }
+#play-ui.fs .fs-controls { display: flex; align-items: center; gap: 10px; position: fixed; right: 16px; bottom: 16px; z-index: 1001;
+  padding: 5px 8px 5px 5px; border-radius: 99px; background: rgba(20, 22, 28, .82); border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35); transition: opacity 300ms; }
+#play-ui.fs .fs-controls .clock { color: #d6d9e0; }
+.fs-exit { width: 28px; height: 28px; padding: 0; border-radius: 50%; background: transparent; border: 0; color: #d6d9e0; font-size: 15px; }
+.fs-exit:hover { background: rgba(255, 255, 255, .12); }
+#play-ui.fs.idle .fs-controls { opacity: 0; pointer-events: none; }
+#play-ui.fs.idle { cursor: none; }
+body.fs-open { overflow: hidden; }

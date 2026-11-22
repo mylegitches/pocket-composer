@@ -1065,6 +1065,10 @@ function onTransport() {
   btn.textContent = mixer.playing ? "❚❚" : "▶";
   btn.setAttribute("aria-label", mixer.playing ? "Pause" : "Play");
   btn.disabled = !mixer.ready;
+  const fsb = $("#fs-pp");
+  fsb.textContent = btn.textContent;
+  fsb.setAttribute("aria-label", btn.getAttribute("aria-label"));
+  fsb.disabled = btn.disabled;
   $("#seek").max = String(mixer.duration || 0);
   updateClock();
   cancelAnimationFrame(play.raf);
@@ -1074,6 +1078,7 @@ function onTransport() {
 function updateClock() {
   const t = mixer.time();
   $("#clock").textContent = `${fmtTime(t)} / ${fmtTime(mixer.duration || 0)}`;
+  $("#fs-clock").textContent = $("#clock").textContent;
   if (!play.seeking) $("#seek").value = String(t);
 }
 
@@ -1135,6 +1140,7 @@ async function openPlay() {
 }
 
 function leavePlay() {
+  setFullscreen(false);
   mixer.pause();
   cancelAnimationFrame(play.raf);
 }
@@ -1226,12 +1232,67 @@ function applyFilter(relayout = false) {
   document.querySelectorAll(".name-light").forEach((el) => el.classList.toggle("muted", play.muted.has(Number(el.dataset.ins))));
   if (play.muted.size && mixer.ready && !mixer.stems) toast("Muting needs each instrument's own audio, which is still being made. It works as soon as that's done.");
   mixer.applyMutes();
-  if (relayout) {
-    const box = $("#play-score");
-    const frac = box.scrollWidth > box.clientWidth ? box.scrollLeft / (box.scrollWidth - box.clientWidth) : 0;
-    renderScore();
-    box.scrollLeft = frac * (box.scrollWidth - box.clientWidth);
+  if (relayout) relayoutKeepingPlace();
+}
+
+// Lay the score out again (new size, hidden staves) without losing your place in it.
+function relayoutKeepingPlace() {
+  const box = $("#play-score");
+  const frac = box.scrollWidth > box.clientWidth ? box.scrollLeft / (box.scrollWidth - box.clientWidth) : 0;
+  renderScore();
+  box.scrollLeft = frac * (box.scrollWidth - box.clientWidth);
+  play.last = null;
+  if (!mixer.playing) drawCursor();
+}
+
+// ---- Full screen: only the music, like a video player. Controls float in a corner and fade when idle.
+// Phones without the Fullscreen API (iPhone Safari) get the same view filling the browser window.
+let fsIdle = 0;
+function inFullscreen() { return $("#play-ui").classList.contains("fs"); }
+
+function setFullscreen(on) {
+  const el = $("#play-ui");
+  if (on === inFullscreen()) return;
+  el.classList.toggle("fs", on);
+  document.body.classList.toggle("fs-open", on);
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (on && !fsEl) {
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) Promise.resolve(req.call(el, { navigationUI: "hide" })).catch(() => {});
+  } else if (!on && fsEl) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) Promise.resolve(exit.call(document)).catch(() => {});
   }
+  $("#fs-btn").setAttribute("aria-pressed", String(on));
+  wakeControls();
+  requestAnimationFrame(() => relayoutKeepingPlace());
+}
+
+function wakeControls() {
+  const el = $("#play-ui");
+  el.classList.remove("idle");
+  clearTimeout(fsIdle);
+  if (inFullscreen()) fsIdle = setTimeout(() => { if (mixer.playing) el.classList.add("idle"); }, 2500);
+}
+
+function initFullscreen() {
+  $("#fs-btn").onclick = () => setFullscreen(!inFullscreen());
+  $("#fs-exit").onclick = () => setFullscreen(false);
+  $("#fs-pp").onclick = () => { mixer.toggle(); wakeControls(); };
+  for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) {
+    document.addEventListener(ev, () => {
+      if (!(document.fullscreenElement || document.webkitFullscreenElement) && inFullscreen()) setFullscreen(false);
+    });
+  }
+  for (const ev of ["mousemove", "touchstart", "keydown"]) {
+    $("#play-ui").addEventListener(ev, () => { if (inFullscreen()) wakeControls(); }, { passive: true });
+  }
+  document.addEventListener("keydown", (e) => {
+    if ($("#play-view").hidden || $("#play-ui").hidden) return;
+    if (e.target.closest("input, textarea, select, [contenteditable]")) return;
+    if (e.key === "Escape" && inFullscreen()) setFullscreen(false);
+    else if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); setFullscreen(!inFullscreen()); }
+  });
 }
 
 // Index of the last item whose start (item[0], or the item itself) is at or before ms; -1 if none.
@@ -1987,6 +2048,7 @@ async function init() {
   $("#lay-strip").onclick = () => setLayout("strip");
   $("#lay-pages").onclick = () => setLayout("pages");
   $("#play-prep-go").onclick = preparePlay;
+  initFullscreen();
   // Scrolling the score yourself pauses the follow for a few seconds.
   for (const ev of ["wheel", "touchstart"]) {
     $("#play-score").addEventListener(ev, () => { play.userScroll = Date.now() + 4000; }, { passive: true });
@@ -1994,7 +2056,7 @@ async function init() {
   let resizeTimer = 0;
   addEventListener("resize", () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { if (!$("#play-view").hidden && getLayout() === "strip") renderScore(); }, 200);
+    resizeTimer = setTimeout(() => { if (!$("#play-view").hidden && getLayout() === "strip") relayoutKeepingPlace(); }, 200);
   });
   // Space plays and pauses on the Play tab.
   document.addEventListener("keydown", (e) => {
