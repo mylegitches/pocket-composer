@@ -591,6 +591,7 @@ function showJob(job) {
   $("#job-spin").hidden = !running;
   const p = state.project;
   const what = job.kind === "playback" ? "Getting it ready to play"
+    : job.kind === "parts" ? "Making printable parts"
     : job.kind === "detect" ? "Finding the parts"
     : p?.kind === "scan" && p.read_as === "tab" ? "Reading the tab with the AI and writing the score"
     : p?.kind === "scan" ? "Reading the notes and writing the score" : "Writing the score";
@@ -884,10 +885,74 @@ function renderOutputs(p, result) {
     return a;
   };
   for (const f of files.filter((f) => !f.part && !["svg", "spos", "mpos"].includes(f.kind))) dl.append(link(f, "." + f.kind));
-  const partFiles = files.filter((f) => f.part);
+  const partFiles = files.filter((f) => f.part === true);
   $("#part-files").hidden = !partFiles.length;
   $("#part-downloads").innerHTML = "";
   for (const f of partFiles) $("#part-downloads").append(link(f, f.file));
+
+  const printFiles = files.filter((f) => f.part === "print");
+  const pd = $("#print-downloads");
+  pd.innerHTML = "";
+  for (const f of printFiles) pd.append(link(f, f.kind === "zip" ? "All parts (.zip)" : f.file.replace(/\.pdf$/, "")));
+  const mscz = files.find((f) => f.kind === "mscz" && !f.part);
+  $("#make-parts").textContent = printFiles.length ? "Make them again" : "Make printable parts";
+  $("#make-parts").disabled = !mscz;
+  $("#open-ms").disabled = $("#to-mscom").disabled = !mscz;
+  $("#save-nas").hidden = !state.nas;
+  $("#save-nas").textContent = `💾 Save to ${state.nas || "NAS"}`;
+}
+
+// ---- more ways out: MuseScore on this device, a NAS folder, MuseScore.com
+
+const msczFile = () => (state.project?.outputs || []).find((f) => f.kind === "mscz" && !f.part);
+
+function downloadFile(f) {
+  const a = document.createElement("a");
+  a.href = f.url;
+  a.download = f.file;
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+async function openInMuseScore() {
+  const f = msczFile();
+  if (!f) return;
+  // Phones: hand the file to the share sheet, where the MuseScore app picks it up (needs https).
+  if (navigator.canShare && matchMedia("(pointer: coarse)").matches) {
+    try {
+      const blob = await fetch(f.url).then((r) => r.blob());
+      const file = new File([blob], f.file, { type: "application/octet-stream" });
+      if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: f.file }); return; }
+    } catch (e) { if (e.name === "AbortError") return; }
+  }
+  downloadFile(f);
+  toast("Downloaded. Open it from your browser's downloads and it opens in MuseScore Studio.");
+}
+
+function uploadToMuseScoreCom() {
+  const f = msczFile();
+  if (!f) return;
+  window.open("https://musescore.com/upload", "_blank", "noopener"); // first, while the click still counts
+  downloadFile(f);
+  toast("Downloaded the .mscz: drop it on MuseScore.com's upload page (sign in there if asked).");
+}
+
+async function saveToNas() {
+  const btn = $("#save-nas");
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/projects/${encodeURIComponent(state.current)}/save_to_nas`, { method: "POST" });
+    toast(`Saved ${r.files.length} file(s) to ${r.folder}`);
+  } catch (e) { toast(e.message, true); }
+  btn.disabled = false;
+}
+
+async function makeParts() {
+  try {
+    showJob(await api(`/api/projects/${encodeURIComponent(state.current)}/parts`, { method: "POST" }));
+    loadProjects();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---------------------------------------------------------------- Play screen
@@ -1736,6 +1801,10 @@ async function init() {
   $("#save").onclick = save;
   $("#reset").onclick = reset;
   $("#convert").onclick = convert;
+  $("#open-ms").onclick = openInMuseScore;
+  $("#to-mscom").onclick = uploadToMuseScoreCom;
+  $("#save-nas").onclick = saveToNas;
+  $("#make-parts").onclick = makeParts;
   for (const id of ["#upload", "#pick-photos", "#pick-camera"]) $(id).onchange = (e) => upload(e.target.files);
   $("#add-pages").onchange = (e) => addPages(e.target.files);
   document.addEventListener("paste", onPaste);
@@ -1787,6 +1856,9 @@ async function init() {
     const el = $("#health");
     el.textContent = h.musescore ? "" : "⚠ MuseScore not found";
     el.classList.toggle("bad", !h.musescore);
+    state.nas = h.nas;
+    $("#save-nas").hidden = !h.nas;
+    $("#save-nas").textContent = `💾 Save to ${h.nas || "NAS"}`;
   });
   $("#pp").onclick = () => mixer.toggle();
   const seek = $("#seek");

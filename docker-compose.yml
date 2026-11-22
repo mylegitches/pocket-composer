@@ -10,4 +10,8 @@ services:
       - ./output:/app/output # scores
       # Optional: a folder of FL Studio projects to browse with the Studio button (read-only)
       # - /path/to/FL Studio/Projects:/library:ro
+      # Optional: a folder to save finished scores and parts into (the "Save to ..." button)
+      # - /path/to/Scores:/export
+    # environment:
+    #   - EXPORT_LABEL=Scores   # what the button calls that folder
     restart: unless-stopped

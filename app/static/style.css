@@ -221,6 +221,9 @@ table.mapping { width: 100%; border-collapse: collapse; }
 .formats input { accent-color: var(--accent-h); }
 
 .result { margin-top: 8px; }
+.ways-out { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.print-parts .card-head { margin-top: 4px; }
+.print-parts p { margin: 0 0 10px; }
 .parts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .chip { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-size: 12px; }
 .chip b { font-weight: 600; }

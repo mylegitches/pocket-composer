@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, playback, preview, sheet
+from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, parts, playback, preview, sheet
 from flp2score.convert import FORMATS, convert, export_file
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,6 +119,11 @@ def _outputs(name: str, stem: str) -> list[dict]:
         for f in sorted((out / "parts").iterdir()):
             if f.is_file():
                 add(f, "parts/" + f.name, part=True)
+    pd = parts.print_dir(out)
+    if pd.is_dir():  # printable parts (and their .zip)
+        for f in sorted(pd.iterdir()):
+            if f.is_file():
+                add(f, f"{parts.PRINT_DIR}/{f.name}", part="print")
     page_no = lambda f: int(m.group(1)) if (m := re.search(r"-(\d+)\.svg$", f["file"])) else 0  # noqa: E731
     svgs = sorted((f for f in files if f["kind"] == "svg"), key=page_no)
     return [f for f in files if f["kind"] != "svg"] + svgs
@@ -305,8 +310,11 @@ def _last_job(name: str) -> dict | None:
     return _job_public(max(jobs, key=lambda j: j["started"])) if jobs else None
 
 
-def _queue_job(project: str, kind: str, params: dict) -> dict:
-    if _active_job(project):
+def _queue_job(project: str, kind: str, params: dict, alongside: tuple[str, ...] = ()) -> dict:
+    """alongside: kinds of job this one may wait behind for the same piece (they touch different files)."""
+    busy = _active_job(project)
+    if busy and (busy["kind"] not in alongside or any(
+            j["project"] == project and j["kind"] == kind and j["state"] in ("queued", "running") for j in JOBS.values())):
         raise HTTPException(409, "This piece is already working on something.")
     j = {"id": uuid.uuid4().hex[:12], "project": project, "kind": kind, "params": params, "state": "queued",
          "progress": 0.0, "log": [], "error": None, "result": None, "started": time.time(), "finished": None}
@@ -565,7 +573,7 @@ def ai_models(body: AIIn) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "musescore": export.find_musescore()}
+    return {"ok": True, "musescore": export.find_musescore(), "nas": EXPORT_LABEL if _export_ok() else None}
 
 
 @app.get("/api/instruments")
@@ -987,6 +995,49 @@ def get_playback(name: str) -> dict:
             "job": job, **copy.deepcopy(_play_cache[key])}
 
 
+@app.post("/api/projects/{name}/parts")
+def make_print_parts(name: str) -> dict:
+    """One printable PDF per instrument, with page turns moved into rests (a background job)."""
+    stem, out = _play_files(name)
+    if _play_source(out, stem) is None:
+        raise HTTPException(400, "convert this piece first")
+    return _queue_job(name, "parts", {}, alongside=("playback",))
+
+
+EXPORT_DIR = Path(os.environ.get("EXPORT_DIR", "/export"))
+EXPORT_LABEL = os.environ.get("EXPORT_LABEL", "the NAS")
+EXPORT_KINDS = {"mscz", "pdf", "mp3", "mid", "mxl", "musicxml", "gp5", "zip"}
+
+
+def _export_ok() -> bool:
+    return EXPORT_DIR.is_dir() and os.access(EXPORT_DIR, os.W_OK)
+
+
+@app.post("/api/projects/{name}/save_to_nas")
+def save_to_nas(name: str) -> dict:
+    """Copy the score, its audio and the printable parts into the NAS folder, one subfolder per piece."""
+    _project_dir(name)
+    if not _export_ok():
+        raise HTTPException(400, "No NAS folder is set up for saving (EXPORT_DIR).")
+    files = [f for f in _summary(name)["outputs"] if f["kind"] in EXPORT_KINDS and f["part"] != True]  # noqa: E712
+    if not files:
+        raise HTTPException(400, "Nothing to save yet: convert the piece first.")
+    out = OUTPUT_DIR / name
+    dest = EXPORT_DIR / _safe_name(name)
+    dest.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for f in files:
+        rel = f["url"].split("/files/", 1)[1]
+        src = (out / rel).resolve()
+        if out.resolve() not in src.parents or not src.is_file():
+            continue
+        target = dest / ("Parts" if f["part"] == "print" else "") / src.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+        saved.append(str(target.relative_to(EXPORT_DIR)).replace("\\", "/"))
+    return {"folder": f"{EXPORT_LABEL}/{dest.name}", "files": saved}
+
+
 @app.post("/api/projects/{name}/playback")
 def prepare_playback(name: str) -> dict:
     """Make what the Play screen needs from the last converted score (pieces converted before it existed)."""
@@ -1216,6 +1267,20 @@ def _run_job(j: dict, log, progress) -> dict | None:
         return {"parts": [{"part": p.name, "instrument": f"pages {p.pages[0]}–{p.pages[-1]}", "notes": "—"}
                           for p in plan.parts], "failed": []}
 
+    if j["kind"] == "parts":
+        stem = _stem(name, kind, files)
+        src = _play_source(out_dir, stem)
+        if src is None:
+            raise RuntimeError("convert this piece first")
+        title = _summary(name).get("title") or stem
+        log("MuseScore: cutting the score into parts…")
+        progress(0.05)
+        made = parts.make_parts(src, out_dir, title, log, progress)
+        if not made:
+            raise RuntimeError("MuseScore could not write any part")
+        log(f"Done: {len(made)} printable part(s).")
+        return {"parts": [], "failed": []}
+
     if j["kind"] == "playback":
         stem = _stem(name, kind, files)
         src = _play_source(out_dir, stem)
@@ -1303,7 +1368,7 @@ def get_file(name: str, filename: str):
     if out not in f.parents or "_work" in f.relative_to(out).parts or not f.is_file():
         raise HTTPException(404, "no such file")
     media = {"svg": "image/svg+xml", "pdf": "application/pdf", "mp3": "audio/mpeg",
-             "gp5": "application/octet-stream"}.get(f.suffix.lstrip("."))
+             "gp5": "application/octet-stream", "zip": "application/zip"}.get(f.suffix.lstrip("."))
     inline = f.suffix in (".svg", ".pdf", ".mp3")
     return FileResponse(f, media_type=media, filename=None if inline else f.name)
 
