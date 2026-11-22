@@ -965,9 +965,10 @@ def get_playback(name: str) -> dict:
     if not ready:
         return {"ready": False, "can_prepare": can, "job": job}
     sd = playback.strip_dir(out)
-    strip_ok = playback.strip_ready(out)
+    strip_ok = playback.strip_current(out)
+    stems_ok = strip_ok and playback.stems_ready(out)  # stems from before the tempo fix stay unused
     key = (name, mp3.stat().st_mtime, mpos_f.stat().st_mtime, mid.stat().st_mtime,
-           (sd / "stems.json").stat().st_mtime if strip_ok else 0,
+           (sd / "stems.json").stat().st_mtime if stems_ok else 0,
            (sd / "strip.spos").stat().st_mtime if strip_ok else 0)
     if key not in _play_cache:
         try:
@@ -980,7 +981,7 @@ def get_playback(name: str) -> dict:
                     svg = sd / "strip-1.svg"
                 tl = playback.timeline(sd / "strip.spos", svg)
                 lay = playback.svg_layout(svg)
-                stems = json.loads((sd / "stems.json").read_text(encoding="utf-8"))
+                stems = json.loads((sd / "stems.json").read_text(encoding="utf-8")) if stems_ok else []
                 if tl and len(stems) == len(data["instruments"]):
                     for ins, st in zip(data["instruments"], stems):
                         if st.get("file") and (sd / st["file"]).is_file():

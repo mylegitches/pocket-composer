@@ -34,8 +34,12 @@ def strip_current(out_dir: Path) -> bool:
     return (d / "strip.spos").is_file() and (d / "strip-1.svg").is_file() and (d / STRIP_VERSION).is_file()
 
 
+STEMS_VERSION = "stems.v2"  # v2: every part keeps the score's tempo (v1 stems drifted at 120 bpm)
+
+
 def stems_ready(out_dir: Path) -> bool:
-    return (strip_dir(out_dir) / "stems.json").is_file()
+    d = strip_dir(out_dir)
+    return (d / "stems.json").is_file() and (d / STEMS_VERSION).is_file()
 
 
 def strip_ready(out_dir: Path) -> bool:
@@ -291,14 +295,85 @@ def timeline(spos_path: Path, page_svg: Path) -> dict | None:
 
 # ---------------------------------------------------------------- one audio file per instrument
 
+def _tempo_marks(root: ET.Element) -> dict[int, list[tuple[float, ET.Element]]]:
+    """Every tempo in the score, by measure: {measure index: [(offset in quarter notes, element)]}.
+
+    MusicXML usually puts the tempo in the top part only. A part cut out on its own would lose it and play
+    at MuseScore's default 120, drifting away from the others; so every part gets these copied in."""
+    marks: dict[int, list[tuple[float, ET.Element]]] = {}
+    seen: set[tuple[int, float, str]] = set()
+    for part in root.findall("part"):
+        div = 1.0
+        for mi, m in enumerate(part.findall("measure")):
+            t = 0.0
+            for el in m:
+                if el.tag == "attributes" and el.findtext("divisions"):
+                    div = float(el.findtext("divisions"))
+                elif el.tag == "note":
+                    if el.find("chord") is None and el.findtext("duration"):
+                        t += float(el.findtext("duration"))
+                elif el.tag == "backup" and el.findtext("duration"):
+                    t -= float(el.findtext("duration"))
+                elif el.tag == "forward" and el.findtext("duration"):
+                    t += float(el.findtext("duration"))
+                elif el.tag in ("direction", "sound"):
+                    snd = el if el.tag == "sound" else el.find("sound")
+                    if snd is None or snd.get("tempo") is None:
+                        continue
+                    off = t + float(el.findtext("offset") or 0)
+                    q = round(off / div, 4)
+                    key = (mi, q, snd.get("tempo"))
+                    if key not in seen:
+                        seen.add(key)
+                        marks.setdefault(mi, []).append((q, el))
+    return marks
+
+
+def _add_tempo(part: ET.Element, marks: dict[int, list[tuple[float, ET.Element]]]) -> None:
+    """Copy the score's tempo marks into a part that lacks them, at the same beat of the same bar."""
+    has = {mi for mi, m in enumerate(part.findall("measure"))
+           if any(s.get("tempo") is not None for s in m.iter("sound"))}
+    div = 1.0
+    for mi, m in enumerate(part.findall("measure")):
+        for a in m.findall("attributes"):
+            if a.findtext("divisions"):
+                div = float(a.findtext("divisions"))
+        if mi in has or mi not in marks:
+            continue
+        at = 0  # after the bar's own print/attributes, before its notes
+        while at < len(m) and m[at].tag in ("print", "attributes"):
+            at += 1
+        for q, el in marks[mi]:
+            new = copy.deepcopy(el)
+            for o in new.findall("offset"):
+                new.remove(o)
+            if q > 0:
+                o = ET.SubElement(new, "offset")
+                o.text = str(int(round(q * div)))
+                if new.tag == "direction":  # offset belongs before <sound> in a direction
+                    snd = new.find("sound")
+                    if snd is not None:
+                        new.remove(o)
+                        new.insert(list(new).index(snd), o)
+            for v in new.findall("voice") + new.findall("staff"):
+                new.remove(v)
+            m.insert(at, new)
+            at += 1
+
+
 def _split_parts(xml_bytes: bytes) -> list[tuple[str, bytes]]:
-    """A MusicXML score -> one MusicXML per part (its name, its bytes), in score order."""
+    """A MusicXML score -> one MusicXML per part (its name, its bytes), in score order. Every part keeps
+    the score's tempo marks, so each one plays (and prints) at the right speed on its own."""
     root = ET.fromstring(xml_bytes)
+    marks = _tempo_marks(root)
     plist = root.find("part-list")
     ids = [sp.get("id") for sp in plist.findall("score-part")] if plist is not None else []
     out = []
     for pid in ids:
         r = copy.deepcopy(root)
+        for part in r.findall("part"):
+            if part.get("id") == pid:
+                _add_tempo(part, marks)
         pl = r.find("part-list")
         for child in list(pl):
             if child.tag == "part-group" or (child.tag == "score-part" and child.get("id") != pid):
@@ -334,6 +409,7 @@ def make_stems(src: Path, out_dir: Path, log=print) -> list[dict]:
         stems.append({"name": name, "file": mp3.name if mp3.is_file() else None})
     full.unlink(missing_ok=True)
     (d / "stems.json").write_text(json.dumps(stems), encoding="utf-8")
+    (d / STEMS_VERSION).write_text("ok", encoding="utf-8")
     return stems
 
 
