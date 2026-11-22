@@ -890,7 +890,7 @@ function renderOutputs(p, result) {
   $("#part-downloads").innerHTML = "";
   for (const f of partFiles) $("#part-downloads").append(link(f, f.file));
 
-  const printFiles = files.filter((f) => f.part === "print");
+  const printFiles = files.filter((f) => f.part === "print").sort((a, b) => (a.kind === "zip") - (b.kind === "zip"));
   const pd = $("#print-downloads");
   pd.innerHTML = "";
   for (const f of printFiles) pd.append(link(f, f.kind === "zip" ? "All parts (.zip)" : f.file.replace(/\.pdf$/, "")));
