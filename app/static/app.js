@@ -1099,16 +1099,20 @@ async function openPlay() {
   $("#play-prep").hidden = d.ready;
   $("#play-ui").hidden = !d.ready;
   const busy = d.job && (d.job.state === "queued" || d.job.state === "running");
+  const failed = !busy && d.job?.state === "failed";
   if (!d.ready) {
     play.data = null;
     mixer.pause();
-    $("#play-prep-text").textContent = busy
+    $("#play-prep-text").textContent = failed
+      ? `It couldn't be made ready to play: ${d.job.error}`
+      : busy
       ? (d.job.state === "queued"
         ? "Getting it ready to play: waiting for the jobs ahead of it. It opens here by itself when it's done."
         : "Getting it ready to play: MuseScore is laying out the score. It opens here by itself when it's done.")
       : d.can_prepare ? "Getting it ready to play…" : "There's nothing to play yet. Convert this piece on the Edit tab first.";
-    $("#play-prep-go").hidden = true;
-    $("#play-prep-edit").hidden = d.can_prepare;
+    $("#play-prep-go").hidden = !(failed && d.can_prepare);
+    $("#play-prep-go").textContent = "Try again";
+    $("#play-prep-edit").hidden = d.can_prepare && !failed;
     $("#play-prep-edit").href = hashFor(name, "edit");
     if (busy) showJob(d.job);
     return;

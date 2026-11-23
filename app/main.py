@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from flp2score import ai, aitest, arrange, assist, catalogue, export, flp, mapping, playback, preview, sheet
 from flp2score import parts as print_parts
 from flp2score.convert import FORMATS, convert, export_file
+from flp2score.score import fix_tuplets_file
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data")).resolve()
@@ -958,12 +959,17 @@ def get_playback(name: str) -> dict:
     mpos_f, mid = playback.mpos(out, stem), playback.play_mid(out, stem)
     pages = sorted(out.glob(f"{stem}-*.svg"), key=lambda p: int(p.stem.rsplit("-", 1)[1])) if out.is_dir() else []
     ready = mp3.is_file() and spos.is_file() and mpos_f.is_file() and mid.is_file() and bool(pages)
-    can = _play_source(out, stem) is not None
+    src = _play_source(out, stem)
+    can = src is not None
     job = _active_job(name)
-    if can and not job and _needs_playback(name):  # get it ready (or finish the extras) without being asked
+    # A playback job that failed on this same score isn't retried by itself: that just loops.
+    last = _last_job(name)
+    failed = (last if last and last["kind"] == "playback" and last["state"] == "failed"
+              and can and src.stat().st_mtime < last["started"] else None)
+    if can and not job and not failed and _needs_playback(name):  # get it ready without being asked
         job = _queue_job(name, "playback", {})
     if not ready:
-        return {"ready": False, "can_prepare": can, "job": job}
+        return {"ready": False, "can_prepare": can, "job": job or failed}
     sd = playback.strip_dir(out)
     strip_ok = playback.strip_current(out)
     stems_ok = strip_ok and playback.stems_ready(out)  # stems from before the tempo fix stay unused
@@ -1288,6 +1294,8 @@ def _run_job(j: dict, log, progress) -> dict | None:
         if src is None:
             raise RuntimeError("convert this piece first")
         title = _summary(name).get("title") or stem
+        if src.suffix == ".musicxml":
+            fix_tuplets_file(src)
         log("MuseScore: cutting the score into parts…")
         progress(0.05)
         made = print_parts.make_parts(src, out_dir, title, log, progress)
@@ -1302,6 +1310,8 @@ def _run_job(j: dict, log, progress) -> dict | None:
         if src is None:
             raise RuntimeError("convert this piece first")
         progress(0.05)
+        if src.suffix == ".musicxml" and fix_tuplets_file(src):
+            log("Fixed triplet brackets MuseScore could not read.")
         if not _base_play_ready(out_dir, stem):
             log(f"MuseScore: laying out {src.name} for playback…")
             # Pages, note and bar positions and the instrument MIDI all come from the same score, so they line up.

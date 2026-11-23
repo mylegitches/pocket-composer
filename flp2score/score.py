@@ -394,6 +394,7 @@ def write_musicxml(score: stream.Score, out: Path) -> Path:
         if hasattr(part, "drum_layout"):
             _add_drum_instruments(root, xml_id, part.drum_layout)
     _tidy(root)
+    fix_tuplets(root)
     tree.write(out, encoding="UTF-8", xml_declaration=True)
     return out
 
@@ -445,6 +446,82 @@ def _add_drum_instruments(root, pid: str, layout_: dict[int, tuple[str, int, str
         pos = max(i for i, k in enumerate(kids) if k.tag in ("duration", "tie", "unpitched", "chord", "grace",
                                                                "cue")) + 1
         n.insert(pos, ET.Element("instrument", id=f"{pid}-I{gm}"))
+
+
+def fix_tuplets(root) -> bool:
+    """Redraw the tuplet brackets from the notes' timing. music21 sometimes leaves triplet notes (often
+    hidden rests) outside any bracket, or runs a bracket across a beat, and MuseScore then fails to open
+    the file at all. Each run of triplet notes in a voice gets one bracket that closes on the beat.
+    -> True if anything changed."""
+    changed = False
+    for part in root.iter("part"):
+        div = 1
+        for m in part.iter("measure"):
+            d = m.find("attributes/divisions")
+            if d is not None and (d.text or "").strip().isdigit():
+                div = int(d.text)
+            pos, voices = 0, {}
+            for el in m:
+                if el.tag == "backup":
+                    pos -= int(el.findtext("duration", "0"))
+                elif el.tag == "forward":
+                    pos += int(el.findtext("duration", "0"))
+                elif el.tag == "note":
+                    dur = int(el.findtext("duration", "0") or 0)
+                    if el.find("grace") is not None:
+                        continue
+                    if el.find("chord") is not None:  # shares the previous note's time and bracket
+                        for t in el.findall("notations/tuplet"):
+                            el.find("notations").remove(t)
+                            changed = True
+                        continue
+                    voices.setdefault(el.findtext("voice", "1"), []).append((pos, dur, el))
+                    pos += dur
+            for notes in voices.values():
+                runs, run, end = [], [], None
+                for on, dur, n in notes:
+                    tm = n.find("time-modification") is not None
+                    if run and (not tm or on != end):  # a plain note or a gap ends the bracket
+                        runs.append(run)
+                        run = []
+                    if tm:
+                        run.append((on, n))
+                        end = on + dur
+                        if end % div == 0:
+                            runs.append(run)
+                            run = []
+                if run:
+                    runs.append(run)
+                for run in runs:
+                    for i, (_, n) in enumerate(run):
+                        want = ("start" if i == 0 else "") + ("stop" if i == len(run) - 1 else "")
+                        have = "".join(sorted(t.get("type", "") for t in n.findall("notations/tuplet")))
+                        if have == "".join(sorted([x for x in ("start", "stop") if x in want])):
+                            continue
+                        changed = True
+                        nots = n.find("notations")
+                        for t in n.findall("notations/tuplet"):
+                            nots.remove(t)
+                        if not want:
+                            if nots is not None and len(nots) == 0:
+                                n.remove(nots)
+                            continue
+                        if nots is None:
+                            nots = ET.SubElement(n, "notations")
+                        for typ in ("start", "stop"):
+                            if typ in want:
+                                ET.SubElement(nots, "tuplet", {"type": typ, "number": "1",
+                                                               **({"bracket": "yes"} if typ == "start" else {})})
+    return changed
+
+
+def fix_tuplets_file(path: Path) -> bool:
+    """fix_tuplets on a MusicXML file, rewritten only if something changed."""
+    tree = ET.parse(path)
+    if not fix_tuplets(tree.getroot()):
+        return False
+    tree.write(path, encoding="UTF-8", xml_declaration=True)
+    return True
 
 
 def _tidy(root) -> None:
